@@ -31,25 +31,42 @@ def parse_progress(line):
 
 async def get_video_info(url):
     """Получаем информацию о видео без скачивания"""
-    cmd = [
-        "python", "-m", "yt_dlp",
-        "-j",  # вывод в JSON
-        "--skip-download",
-        url
+    # Пробуем разные способы вызова yt-dlp
+    commands_to_try = [
+        ["yt-dlp", "-j", "--skip-download", url],
+        ["yt-dlp", "-J", "--skip-download", url],
+        ["python", "-m", "yt_dlp", "-j", "--skip-download", url],
+        ["python3", "-m", "yt_dlp", "-j", "--skip-download", url],
     ]
     
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode == 0:
-        data = json.loads(result.stdout)
-        return data
+    for cmd in commands_to_try:
+        try:
+            result = subprocess.run(
+                cmd, 
+                capture_output=True, 
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0 and result.stdout:
+                data = json.loads(result.stdout)
+                return data
+        except:
+            continue
+    
     return None
 
 
-def estimate_file_size(duration_seconds, bitrate_mbps=2.5):
-    """Примерная оценка размера файла в МБ (для 1080p ~2.5 Мбит/с)"""
-    # размер_МБ = (битрейт_Мбит/с * длительность_сек) / 8
-    estimated_mb = (bitrate_mbps * duration_seconds) / 8
-    return estimated_mb
+def check_ytdlp_installed():
+    """Проверяем, установлен ли yt-dlp"""
+    try:
+        subprocess.run(["yt-dlp", "--version"], capture_output=True, check=True)
+        return True
+    except:
+        try:
+            subprocess.run(["python", "-m", "yt_dlp", "--version"], capture_output=True, check=True)
+            return True
+        except:
+            return False
 
 
 # ---------------- START ----------------
@@ -76,48 +93,69 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     outtmpl = os.path.join(tmpdir, "video.%(ext)s")
 
     try:
+        # Проверяем установку yt-dlp
+        if not check_ytdlp_installed():
+            await msg.edit_text(
+                "❌ yt-dlp не установлен!\n"
+                "Установите его командой:\n"
+                "`pip install yt-dlp`",
+                parse_mode='Markdown'
+            )
+            return
+        
         # Получаем информацию о видео
         video_info = await get_video_info(url)
         
         if not video_info:
-            await msg.edit_text("❌ Не удалось получить информацию о видео")
-            return
-        
-        duration = video_info.get('duration', 0)
-        
-        # Оцениваем размер для 1080p
-        estimated_size_1080p = estimate_file_size(duration, bitrate_mbps=2.5)
-        
-        # Выбираем качество
-        if estimated_size_1080p < 100:
-            quality = "1080p"
-            format_string = (
-                "best[height<=1080][ext=mp4]/"
-                "best[height<=1080]/"
-                "best[ext=mp4]/"
-                "best"
+            # Если не удалось получить инфу, просто скачиваем 720p (безопасный вариант)
+            await msg.edit_text(
+                "⚠️ Не удалось оценить размер видео.\n"
+                "Скачиваю в 720p (безопасный вариант)..."
             )
-        else:
             quality = "720p"
             format_string = (
                 "best[height<=720][ext=mp4]/"
                 "best[ext=mp4]/"
                 "best"
             )
-        
-        await msg.edit_text(
-            f"⏳ Скачиваю видео...\n"
-            f"📺 Качество: {quality}\n"
-            f"📊 Примерный размер: {estimated_size_1080p:.1f} МБ"
-        )
+        else:
+            # Получаем длительность видео
+            duration = video_info.get('duration', 0)
+            
+            # Оцениваем размер для 1080p (2.5 Мбит/с для 1080p)
+            estimated_size_1080p = (2.5 * duration) / 8
+            
+            # Выбираем качество
+            if estimated_size_1080p < 100 and duration > 0:
+                quality = "1080p"
+                format_string = (
+                    "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
+                    "best[height<=1080][ext=mp4]/"
+                    "best[height<=1080]/"
+                    "best"
+                )
+            else:
+                quality = "720p"
+                format_string = (
+                    "best[height<=720][ext=mp4]/"
+                    "best[ext=mp4]/"
+                    "best"
+                )
+            
+            await msg.edit_text(
+                f"⏳ Скачиваю видео...\n"
+                f"📺 Качество: {quality}\n"
+                f"📊 Примерный размер: {estimated_size_1080p:.1f} МБ"
+            )
         
         # Команда для скачивания
         cmd = [
-            "python", "-m", "yt_dlp",
+            "yt-dlp",  # Используем прямую команду
             "-f", format_string,
             "-N", "8",
             "--newline",
             "-o", outtmpl,
+            "--no-playlist",
             url
         ]
 
@@ -145,6 +183,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         process.wait()
 
+        if process.returncode != 0:
+            await msg.edit_text("❌ Ошибка при скачивании видео")
+            return
+
         # Ищем видео
         for f in os.listdir(tmpdir):
             path = os.path.join(tmpdir, f)
@@ -161,54 +203,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Проверяем реальный размер файла
         file_size_mb = os.path.getsize(downloaded_file) / (1024 * 1024)
         
-        # Если реальный размер превышает 100 МБ, пробуем скачать в 720p
-        if file_size_mb > 100 and quality == "1080p":
+        if file_size_mb > 50:
             await msg.edit_text(
-                f"⚠️ Реальный размер ({file_size_mb:.1f} МБ) превышает 100 МБ.\n"
-                f"⏳ Пробую скачать в 720p..."
+                f"⚠️ Видео весит {file_size_mb:.1f} МБ.\n"
+                f"Telegram боты могут отправлять видео до 50 МБ.\n"
+                f"Попробуйте скачать в более низком качестве."
             )
-            
-            # Скачиваем в 720p
-            format_string_720 = (
-                "best[height<=720][ext=mp4]/"
-                "best[ext=mp4]/"
-                "best"
-            )
-            
-            cmd_720 = [
-                "python", "-m", "yt_dlp",
-                "-f", format_string_720,
-                "-N", "8",
-                "-o", outtmpl.replace(".%(ext)s", "_720.%(ext)s"),
-                url
-            ]
-            
-            process_720 = subprocess.Popen(
-                cmd_720,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
-            )
-            
-            for line in process_720.stdout:
-                percent = parse_progress(line)
-                if percent is not None:
-                    try:
-                        await msg.edit_text(
-                            f"⏳ Скачиваю 720p...\n{percent:.1f}%"
-                        )
-                    except:
-                        pass
-            
-            process_720.wait()
-            
-            # Ищем новый файл
-            for f in os.listdir(tmpdir):
-                if "_720" in f and (f.endswith(".mp4") or f.endswith(".mkv") or f.endswith(".webm")):
-                    downloaded_file = os.path.join(tmpdir, f)
-                    quality = "720p"
-                    break
+            return
 
         # Отправка
         await msg.edit_text(f"📤 Отправляю видео... ({quality})")
@@ -216,7 +217,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(downloaded_file, "rb") as video:
             await update.message.reply_video(
                 video=video,
-                caption=f"✅ Готово!\n📺 Качество: {quality}",
+                caption=f"✅ Готово!\n📺 Качество: {quality}\n📊 Размер: {file_size_mb:.1f} МБ",
                 supports_streaming=True,
                 read_timeout=600,
                 write_timeout=600,
@@ -224,8 +225,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await msg.delete()
 
+    except subprocess.TimeoutExpired:
+        await msg.edit_text("❌ Превышено время ожидания")
     except Exception as e:
-        await msg.edit_text(f"❌ Ошибка: {e}")
+        await msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+        print(f"Error: {e}")
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -234,7 +238,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------- MAIN ----------------
 def main():
     if not TOKEN or TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
-        print("❌ Вставь токен!")
+        print("❌ Вставь токен в переменную TOKEN!")
+        return
+
+    # Проверяем наличие yt-dlp при запуске
+    if not check_ytdlp_installed():
+        print("❌ yt-dlp не установлен!")
+        print("Установите его командой: pip install yt-dlp")
         return
 
     app = Application.builder().token(TOKEN).build()
