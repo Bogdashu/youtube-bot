@@ -7,12 +7,8 @@ import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-# =======================
-# 🔥 ТОКЕН ИЗ ПЕРЕМЕННЫХ RAILWAY
-# =======================
-TOKEN = os.environ.get("BOT_TOKEN", "PASTE_YOUR_BOT_TOKEN_HERE")
+TOKEN = os.environ.get("BOT_TOKEN")
 
-# Логирование для Railway
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -29,14 +25,10 @@ def parse_progress(line):
     return None
 
 
-# ---------------- START ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🎬 Отправь YouTube ссылку — я скачаю видео"
-    )
+    await update.message.reply_text("🎬 Отправь YouTube ссылку — я скачаю видео")
 
 
-# ---------------- DOWNLOAD ----------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
 
@@ -47,14 +39,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ Начинаю загрузку...")
 
     tmpdir = tempfile.mkdtemp(prefix="yt_")
-    outtmpl = os.path.join(tmpdir, "video.%(ext)s")
+    outtmpl = os.path.join(tmpdir, "video.mp4")
 
     cmd = [
         "python", "-m", "yt_dlp",
-        "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+        "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]",
         "-N", "8",
         "--merge-output-format", "mp4",
-        "--newline",
         "-o", outtmpl,
         url
     ]
@@ -66,64 +57,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text=True
     )
 
-    downloaded_file = None
-
     try:
-        # Читаем вывод в реальном времени
-        while True:
-            line = process.stderr.readline()
-            if not line:
-                break
-                
+        for line in process.stderr:
             percent = parse_progress(line)
             if percent is not None:
                 try:
                     await msg.edit_text(f"⏳ Скачивание... {percent:.1f}%")
                 except:
                     pass
-            logger.info(f"yt-dlp: {line.strip()}")
 
         process.wait()
 
-        # Проверяем код возврата
         if process.returncode != 0:
-            logger.error(f"yt-dlp вернул код ошибки: {process.returncode}")
-            await msg.edit_text("❌ Ошибка при скачивании видео")
+            await msg.edit_text("❌ Ошибка при скачивании")
             return
 
-        # Ищем файл с расширением .mp4
-        all_files = os.listdir(tmpdir)
-        logger.info(f"Файлы в tmpdir: {all_files}")
-        
-        for f in all_files:
-            if f.endswith(".mp4"):
-                downloaded_file = os.path.join(tmpdir, f)
-                break
-
-        # Если не нашли .mp4, ищем любой файл
-        if not downloaded_file:
-            for f in all_files:
-                file_path = os.path.join(tmpdir, f)
-                if os.path.isfile(file_path) and os.path.getsize(file_path) > 0:
-                    downloaded_file = file_path
-                    break
-
-        if not downloaded_file:
-            logger.error(f"Файл не найден в {tmpdir}")
-            await msg.edit_text("❌ Ошибка: файл не найден")
+        if not os.path.exists(outtmpl) or os.path.getsize(outtmpl) == 0:
+            await msg.edit_text("❌ Файл не найден или пустой")
             return
 
-        file_size = os.path.getsize(downloaded_file) / (1024 * 1024)
-        logger.info(f"Найден файл: {downloaded_file}, размер: {file_size:.1f}MB")
-
+        file_size = os.path.getsize(outtmpl) / (1024 * 1024)
         await msg.edit_text(f"📤 Отправляю видео... ({file_size:.1f}MB)")
 
-        with open(downloaded_file, "rb") as video_file:
+        with open(outtmpl, "rb") as video_file:
             await update.message.reply_video(
                 video=video_file,
-                caption="✅ Готово!",
-                write_timeout=60,
-                read_timeout=60
+                caption="✅ Готово!"
             )
 
     except Exception as e:
@@ -132,23 +91,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
-        logger.info("Временная директория удалена")
 
 
-# ---------------- MAIN ----------------
 def main():
-    if not TOKEN or TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
-        print("❌ Токен не найден! Установи переменную BOT_TOKEN в Railway")
+    if not TOKEN:
+        print("❌ Токен не найден!")
         return
 
     app = Application.builder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("🤖 Bot started on Railway...")
-    logger.info("Бот успешно запущен на Railway")
-    
     app.run_polling()
 
 
