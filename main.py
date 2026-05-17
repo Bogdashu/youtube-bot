@@ -1,182 +1,144 @@
-import asyncio
 import os
-import shutil
+import re
 import tempfile
-from pathlib import Path
+import subprocess
+import shutil
 
 from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
-    ContextTypes,
     MessageHandler,
+    ContextTypes,
     filters,
 )
 
-from yt_dlp import YoutubeDL
+# =======================
+# TOKEN
+# =======================
+TOKEN = os.getenv("BOT_TOKEN", "PASTE_YOUR_BOT_TOKEN_HERE")
 
-TOKEN = os.getenv("BOT_TOKEN")
-
-MAX_SIZE_1080 = 50 * 1024 * 1024
+progress_regex = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
 
 
-# =========================
-# START
-# =========================
+def parse_progress(line):
+    match = progress_regex.search(line)
+
+    if match:
+        return float(match.group(1))
+
+    return None
+
+
+# ---------------- START ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🎬 Отправь YouTube ссылку"
+        "🎬 Отправь YouTube ссылку — я скачаю видео"
     )
 
 
-# =========================
-# CHECK URL
-# =========================
-def is_youtube(url: str):
-    return (
-        "youtube.com" in url
-        or "youtu.be" in url
-    )
-
-
-# =========================
-# FIND VIDEO
-# =========================
-def find_video(folder):
-    exts = [".mp4", ".mkv", ".webm"]
-
-    files = []
-
-    for p in Path(folder).rglob("*"):
-        if p.is_file():
-            if p.suffix.lower() in exts:
-                files.append(p)
-
-    if not files:
-        return None
-
-    return str(max(files, key=lambda x: x.stat().st_size))
-
-
-# =========================
-# DOWNLOAD
-# =========================
-def download_video(url, folder, quality):
-    outtmpl = os.path.join(
-        folder,
-        "%(title)s.%(ext)s"
-    )
-
-    ydl_opts = {
-        # Видео + звук
-        "format": (
-            f"bv*[height<={quality}]+ba/"
-            f"b[height<={quality}]/"
-            "best"
-        ),
-
-        # Склейка
-        "merge_output_format": "mp4",
-
-        "outtmpl": outtmpl,
-
-        "quiet": True,
-        "noplaylist": True,
-
-        # Стабильность
-        "retries": 15,
-        "fragment_retries": 15,
-        "extractor_retries": 15,
-
-        "socket_timeout": 30,
-
-        # ffmpeg mp4
-        "postprocessors": [{
-            "key": "FFmpegVideoConvertor",
-            "preferedformat": "mp4",
-        }],
-    }
-
-    with YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
-
-    return find_video(folder)
-
-
-# =========================
-# HANDLE
-# =========================
-async def handle_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+# ---------------- DOWNLOAD ----------------
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
 
-    if not is_youtube(url):
+    if "youtube" not in url and "youtu.be" not in url:
         await update.message.reply_text(
             "❌ Это не YouTube ссылка"
         )
         return
 
     msg = await update.message.reply_text(
-        "⏳ Скачиваю..."
+        "⏳ Скачиваю видео..."
     )
 
     tmpdir = tempfile.mkdtemp(prefix="yt_")
 
+    outtmpl = os.path.join(
+        tmpdir,
+        "video.%(ext)s"
+    )
+
+    # =========================
+    # 720p + звук + видео
+    # =========================
+    format_string = (
+        "best[height<=720][ext=mp4]/"
+        "best[ext=mp4]/"
+        "best"
+    )
+
+    cmd = [
+        "python",
+        "-m",
+        "yt_dlp",
+        "-f",
+        format_string,
+        "-N",
+        "8",
+        "--newline",
+        "-o",
+        outtmpl,
+        url
+    ]
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1
+    )
+
+    downloaded_file = None
+
     try:
-        # =========================
-        # TRY 1080P
-        # =========================
-        await msg.edit_text(
-            "⏳ Пробую 1080p..."
-        )
+        for line in process.stdout:
+            percent = parse_progress(line)
 
-        video = await asyncio.to_thread(
-            download_video,
-            url,
-            tmpdir,
-            1080
-        )
+            if percent is not None:
+                try:
+                    await msg.edit_text(
+                        f"⏳ Скачиваю видео...\n{percent:.1f}%"
+                    )
+                except:
+                    pass
 
-        if not video:
-            raise Exception("Видео не найдено")
-
-        size = os.path.getsize(video)
+        process.wait()
 
         # =========================
-        # IF > 50MB => 720P
+        # Ищем видео
         # =========================
-        if size > MAX_SIZE_1080:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+        for f in os.listdir(tmpdir):
+            path = os.path.join(tmpdir, f)
 
-            tmpdir = tempfile.mkdtemp(prefix="yt_")
+            if (
+                os.path.isfile(path)
+                and (
+                    f.endswith(".mp4")
+                    or f.endswith(".mkv")
+                    or f.endswith(".webm")
+                )
+            ):
+                downloaded_file = path
+                break
 
+        if not downloaded_file:
             await msg.edit_text(
-                "⚠️ Видео >50MB\n⏳ Перехожу на 720p..."
+                "❌ Ошибка: файл не найден"
             )
-
-            video = await asyncio.to_thread(
-                download_video,
-                url,
-                tmpdir,
-                720
-            )
-
-            if not video:
-                raise Exception("720p видео не найдено")
+            return
 
         # =========================
-        # SEND
+        # Отправка
         # =========================
         await msg.edit_text(
-            "📤 Отправляю..."
+            "📤 Отправляю видео... (720p)"
         )
 
-        with open(video, "rb") as f:
+        with open(downloaded_file, "rb") as video:
             await update.message.reply_video(
-                video=f,
-                caption="✅ Готово",
+                video=video,
+                caption="✅ Готово!",
                 supports_streaming=True,
                 read_timeout=600,
                 write_timeout=600,
@@ -185,20 +147,16 @@ async def handle_message(
         await msg.delete()
 
     except Exception as e:
-        await msg.edit_text(
-            f"❌ Ошибка:\n{e}"
-        )
+        await msg.edit_text(f"❌ Ошибка: {e}")
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-# =========================
-# MAIN
-# =========================
+# ---------------- MAIN ----------------
 def main():
-    if not TOKEN:
-        print("BOT_TOKEN not found")
+    if not TOKEN or TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
+        print("❌ Вставь токен!")
         return
 
     app = Application.builder().token(TOKEN).build()
@@ -214,10 +172,16 @@ def main():
         )
     )
 
-    print("BOT STARTED")
-
+    print("🤖 Bot started...")
     app.run_polling()
 
 
 if __name__ == "__main__":
     main()
+
+можешь пожалуйста сделать из этого кода загрузчик 1080p в приоритете если есть возможность при этом чтоб видео 100 процентов скачалось без всяких файл не найден и тд
+И чтобы всегда абсолютно всегда был звук и видео а не по отдельности
+
+и оптимизируй для загрузки длинных видео чтоб не падало ничего
+и чтоб принудительно 1080p на видео меньше 50мб и 720p если больше дай фулл кодэ
+
