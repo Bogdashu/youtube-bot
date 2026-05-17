@@ -21,7 +21,6 @@ TOKEN = os.getenv("BOT_TOKEN", "PASTE_YOUR_BOT_TOKEN_HERE")
 # =========================
 # SETTINGS
 # =========================
-MAX_BEST_MB = 60
 THREADS = "8"
 
 progress_regex = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
@@ -89,7 +88,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # =========================
-        # 1. Получаем инфу о размере
+        # Получаем размер видео
         # =========================
         probe_cmd = [
             "python",
@@ -98,7 +97,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "--print",
             "%(filesize_approx)s",
             "-f",
-            "bv*[height<=1080]+ba/best",
+            "bestvideo+bestaudio/best",
             url,
         ]
 
@@ -114,17 +113,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         size_mb = format_mb(filesize) if filesize else 0
 
         # =========================
-        # 2. Выбор качества
+        # Выбор качества
         # =========================
-        if size_mb and size_mb <= MAX_BEST_MB:
+        if size_mb <= 100:
             quality = "1080p"
             format_string = (
                 "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]"
             )
-        else:
+
+        elif size_mb <= 180:
             quality = "720p"
             format_string = (
                 "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]"
+            )
+
+        else:
+            quality = "480p"
+            format_string = (
+                "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480]"
             )
 
         await msg.edit_text(
@@ -132,7 +138,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         # =========================
-        # 3. Скачивание
+        # Скачивание
         # =========================
         outtmpl = os.path.join(tmpdir, "%(title)s.%(ext)s")
 
@@ -188,7 +194,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process.wait()
 
         # =========================
-        # 4. Ищем mp4 файл
+        # Поиск mp4 файла
         # =========================
         downloaded_file = None
 
@@ -207,8 +213,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text("❌ Ошибка: файл не найден")
             return
 
+        final_size = format_mb(os.path.getsize(downloaded_file))
+
         # =========================
-        # 5. Отправка
+        # Если файл слишком большой
+        # =========================
+        if final_size > 1900:
+            await msg.edit_text(
+                "❌ Видео слишком большое для Telegram"
+            )
+            return
+
+        # =========================
+        # Отправка
         # =========================
         await msg.edit_text(
             f"📤 Отправляю видео... ({quality})"
@@ -217,12 +234,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(downloaded_file, "rb") as video_file:
             await update.message.reply_video(
                 video=video_file,
-                caption="✅ Готово!",
-                read_timeout=300,
-                write_timeout=300,
-                connect_timeout=300,
-                pool_timeout=300,
+                caption=f"✅ Готово!\n📦 Размер: {final_size} MB",
                 supports_streaming=True,
+                read_timeout=600,
+                write_timeout=600,
+                connect_timeout=600,
+                pool_timeout=600,
             )
 
         await msg.delete()
@@ -245,8 +262,12 @@ def main():
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+
     app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_message
+        )
     )
 
     print("🤖 Bot started...")
