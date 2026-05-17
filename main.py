@@ -33,7 +33,7 @@ def parse_progress(line):
 # ---------------- START ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🎬 Отправь YouTube ссылку — я скачаю видео в 1080p"
+        "🎬 Отправь YouTube ссылку — я скачаю видео"
     )
 
 
@@ -48,7 +48,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = await update.message.reply_text(
-        "⏳ Скачиваю видео в 1080p..."
+        "⏳ Скачиваю видео..."
     )
 
     tmpdir = tempfile.mkdtemp(prefix="yt_")
@@ -59,10 +59,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     # =========================
-    # 1080p + звук + видео
+    # 720p + звук + видео
     # =========================
     format_string = (
-        "best[height<=1080][ext=mp4]/"
+        "best[height<=720][ext=mp4]/"
         "best[ext=mp4]/"
         "best"
     )
@@ -98,7 +98,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if percent is not None:
                 try:
                     await msg.edit_text(
-                        f"⏳ Скачиваю видео 1080p...\n{percent:.1f}%"
+                        f"⏳ Скачиваю видео...\n{percent:.1f}%"
                     )
                 except:
                     pass
@@ -128,29 +128,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Проверяем размер файла
-        file_size_mb = round(os.path.getsize(downloaded_file) / 1024 / 1024, 1)
-        
-        # Telegram ограничение - 2GB (2048 MB), но для надежности 1900 MB
-        if file_size_mb > 1900:
-            await msg.edit_text(
-                f"❌ Видео слишком большое ({file_size_mb} MB)\n"
-                f"Telegram позволяет отправлять файлы до 1900 MB\n"
-                f"Попробуйте качество 720p"
-            )
-            return
-
         # =========================
         # Отправка
         # =========================
         await msg.edit_text(
-            f"📤 Отправляю видео... (1080p, {file_size_mb} MB)"
+            "📤 Отправляю видео... (720p)"
         )
 
         with open(downloaded_file, "rb") as video:
             await update.message.reply_video(
                 video=video,
-                caption=f"✅ Готово!\n🎬 Качество: 1080p\n📦 Размер: {file_size_mb} MB",
+                caption="✅ Готово!",
                 supports_streaming=True,
                 read_timeout=600,
                 write_timeout=600,
@@ -184,8 +172,7 @@ def main():
         )
     )
 
-    print("🤖 Bot started (1080p version)...")
-    print("✅ Поддерживаются видео до 1900 MB")
+    print("🤖 Bot started...")
     app.run_polling()
 
 
