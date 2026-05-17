@@ -7,6 +7,9 @@ import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
+# =======================
+# 🔥 ТОКЕН ИЗ ПЕРЕМЕННЫХ RAILWAY
+# =======================
 TOKEN = os.environ.get("BOT_TOKEN", "PASTE_YOUR_BOT_TOKEN_HERE")
 
 # Логирование для Railway
@@ -48,7 +51,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cmd = [
         "python", "-m", "yt_dlp",
-        "-f", "bv*[height<=1080]+ba/best",
+        "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
         "-N", "8",
         "--merge-output-format", "mp4",
         "--newline",
@@ -66,40 +69,70 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     downloaded_file = None
 
     try:
-        for line in process.stderr:
+        # Читаем вывод в реальном времени
+        while True:
+            line = process.stderr.readline()
+            if not line:
+                break
+                
             percent = parse_progress(line)
-
             if percent is not None:
                 try:
                     await msg.edit_text(f"⏳ Скачивание... {percent:.1f}%")
                 except:
                     pass
+            logger.info(f"yt-dlp: {line.strip()}")
 
         process.wait()
 
-        for f in os.listdir(tmpdir):
+        # Проверяем код возврата
+        if process.returncode != 0:
+            logger.error(f"yt-dlp вернул код ошибки: {process.returncode}")
+            await msg.edit_text("❌ Ошибка при скачивании видео")
+            return
+
+        # Ищем файл с расширением .mp4
+        all_files = os.listdir(tmpdir)
+        logger.info(f"Файлы в tmpdir: {all_files}")
+        
+        for f in all_files:
             if f.endswith(".mp4"):
                 downloaded_file = os.path.join(tmpdir, f)
                 break
 
+        # Если не нашли .mp4, ищем любой файл
         if not downloaded_file:
+            for f in all_files:
+                file_path = os.path.join(tmpdir, f)
+                if os.path.isfile(file_path) and os.path.getsize(file_path) > 0:
+                    downloaded_file = file_path
+                    break
+
+        if not downloaded_file:
+            logger.error(f"Файл не найден в {tmpdir}")
             await msg.edit_text("❌ Ошибка: файл не найден")
             return
 
-        await msg.edit_text("📤 Отправляю видео...")
+        file_size = os.path.getsize(downloaded_file) / (1024 * 1024)
+        logger.info(f"Найден файл: {downloaded_file}, размер: {file_size:.1f}MB")
+
+        await msg.edit_text(f"📤 Отправляю видео... ({file_size:.1f}MB)")
 
         with open(downloaded_file, "rb") as video_file:
             await update.message.reply_video(
                 video=video_file,
-                caption="✅ Готово!"
+                caption="✅ Готово!",
+                write_timeout=60,
+                read_timeout=60
             )
 
     except Exception as e:
         logger.error(f"Ошибка: {e}")
-        await msg.edit_text(f"❌ Ошибка: {e}")
+        await msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+        logger.info("Временная директория удалена")
 
 
 # ---------------- MAIN ----------------
@@ -116,7 +149,6 @@ def main():
     print("🤖 Bot started on Railway...")
     logger.info("Бот успешно запущен на Railway")
     
-    # Railway сам перезапускает при падениях
     app.run_polling()
 
 
