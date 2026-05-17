@@ -117,20 +117,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # =========================
         if size_mb <= 100:
             quality = "1080p"
+
             format_string = (
-                "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]"
+                "bestvideo[height<=1080][ext=mp4]+"
+                "bestaudio[ext=m4a]/best[height<=1080]"
             )
 
         elif size_mb <= 180:
             quality = "720p"
+
             format_string = (
-                "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]"
+                "bestvideo[height<=720][ext=mp4]+"
+                "bestaudio[ext=m4a]/best[height<=720]"
             )
 
         else:
             quality = "480p"
+
             format_string = (
-                "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480]"
+                "bestvideo[height<=480][ext=mp4]+"
+                "bestaudio[ext=m4a]/best[height<=480]"
             )
 
         await msg.edit_text(
@@ -174,7 +180,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not line:
                 break
 
-            text = line.decode("utf-8", errors="ignore").strip()
+            text = line.decode(
+                "utf-8",
+                errors="ignore"
+            ).strip()
 
             percent = parse_progress(text)
 
@@ -186,7 +195,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                     try:
                         await msg.edit_text(
-                            f"⏳ Скачиваю видео... ({size_mb} MB)\n{current}%"
+                            f"⏳ Скачиваю видео... ({size_mb} MB)\n"
+                            f"{current}%"
                         )
                     except:
                         pass
@@ -194,29 +204,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process.wait()
 
         # =========================
-        # Поиск mp4 файла
+        # Поиск готового видео
         # =========================
         downloaded_file = None
+
+        video_extensions = (
+            ".mp4",
+            ".mkv",
+            ".webm",
+            ".mov"
+        )
 
         for f in os.listdir(tmpdir):
             path = os.path.join(tmpdir, f)
 
             if (
                 os.path.isfile(path)
-                and f.lower().endswith(".mp4")
+                and f.lower().endswith(video_extensions)
                 and os.path.getsize(path) > 100000
             ):
                 downloaded_file = path
                 break
 
         if not downloaded_file:
-            await msg.edit_text("❌ Ошибка: файл не найден")
+            files = os.listdir(tmpdir)
+
+            await msg.edit_text(
+                f"❌ Видео не найдено\n"
+                f"Файлы: {files}"
+            )
             return
 
-        final_size = format_mb(os.path.getsize(downloaded_file))
+        final_size = format_mb(
+            os.path.getsize(downloaded_file)
+        )
 
         # =========================
-        # Если файл слишком большой
+        # Слишком большой файл
         # =========================
         if final_size > 1900:
             await msg.edit_text(
@@ -234,7 +258,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(downloaded_file, "rb") as video_file:
             await update.message.reply_video(
                 video=video_file,
-                caption=f"✅ Готово!\n📦 Размер: {final_size} MB",
+                caption=(
+                    f"✅ Готово!\n"
+                    f"📦 Размер: {final_size} MB"
+                ),
                 supports_streaming=True,
                 read_timeout=600,
                 write_timeout=600,
@@ -261,7 +288,9 @@ def main():
 
     app = Application.builder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(
+        CommandHandler("start", start)
+    )
 
     app.add_handler(
         MessageHandler(
