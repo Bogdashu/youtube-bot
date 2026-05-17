@@ -59,10 +59,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     # =========================
-    # Качество
+    # 720p + звук + видео
     # =========================
     format_string = (
-        "bestvideo[height<=720]+bestaudio/best[height<=720]"
+        "best[height<=720][ext=mp4]/"
+        "best[ext=mp4]/"
+        "best"
     )
 
     cmd = [
@@ -73,8 +75,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         format_string,
         "-N",
         "8",
-        "--merge-output-format",
-        "mp4",
         "--newline",
         "-o",
         outtmpl,
