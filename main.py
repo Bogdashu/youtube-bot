@@ -5,11 +5,10 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 from telegram import Update
 from telegram.constants import ChatAction
-from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 from yt_dlp import YoutubeDL
@@ -44,6 +43,35 @@ def is_youtube_url(url: str) -> bool:
             "m.youtube.com",
         )
     )
+
+
+def find_ffmpeg_location() -> Optional[str]:
+    """
+    Возвращает путь к ffmpeg, если он доступен в PATH.
+    Если ffmpeg лежит рядом с ботом или в отдельной папке, можно задать FFMPEG_PATH.
+    """
+    custom = os.getenv("FFMPEG_PATH")
+    if custom:
+        ffmpeg_bin = Path(custom)
+        if ffmpeg_bin.is_file():
+            return str(ffmpeg_bin.parent)
+        if ffmpeg_bin.is_dir():
+            return str(ffmpeg_bin)
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        return str(Path(ffmpeg).parent)
+
+    return None
+
+
+def check_ffmpeg_or_raise() -> str:
+    ffmpeg_location = find_ffmpeg_location()
+    if not ffmpeg_location:
+        raise RuntimeError(
+            "ffmpeg не найден. Установи ffmpeg и ffprobe или задай FFMPEG_PATH."
+        )
+    return ffmpeg_location
 
 
 async def safe_edit_text(message, text: str) -> None:
@@ -87,9 +115,9 @@ class ProgressReporter:
                     should_update = True
                 if (now - self.last_update_ts) >= 7.0:
                     should_update = True
-
-            elif (now - self.last_update_ts) >= 10.0:
-                should_update = True
+            else:
+                if (now - self.last_update_ts) >= 10.0:
+                    should_update = True
 
             if should_update:
                 self.last_update_ts = now
@@ -106,20 +134,29 @@ class ProgressReporter:
 
         elif status == "finished":
             asyncio.run_coroutine_threadsafe(
-                safe_edit_text(self.message, f"{self.label}\n✅ Скачано, обрабатываю файл..."),
+                safe_edit_text(
+                    self.message,
+                    f"{self.label}\n✅ Скачано, объединяю звук и видео...",
+                ),
                 self.loop,
             )
 
 
-def build_ydl_opts(tmpdir: str, cap_height: int, progress_hook) -> dict:
+def build_ydl_opts(tmpdir: str, cap_height: int, progress_hook, ffmpeg_location: str) -> dict:
+    # Всегда стараемся взять видео + аудио вместе.
+    # bv*+ba = лучший видео+лучший аудио поток
+    # /b      = fallback на прогрессивный файл, если он есть
     format_selector = (
-        f"bv*[height<={cap_height}]+ba/b[height<={cap_height}]/"
-        f"bv*+ba/b"
+        f"bv*[height<={cap_height}]+ba/"
+        f"b[height<={cap_height}]/"
+        f"bv*+ba/"
+        f"b"
     )
 
     return {
         "format": format_selector,
-        "merge_output_format": "mp4/mkv",
+        "merge_output_format": "mp4",
+        "ffmpeg_location": ffmpeg_location,
         "outtmpl": os.path.join(tmpdir, "%(id)s.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
@@ -132,52 +169,63 @@ def build_ydl_opts(tmpdir: str, cap_height: int, progress_hook) -> dict:
         "concurrent_fragment_downloads": 4,
         "socket_timeout": 20,
         "progress_hooks": [progress_hook],
+        "keepvideo": False,
     }
 
 
 def find_final_media_file(tmpdir: str) -> Optional[str]:
     root = Path(tmpdir)
-    files = []
+    candidates = []
 
     for p in root.rglob("*"):
         if not p.is_file():
             continue
 
         name = p.name.lower()
-        if name.endswith(".part") or name.endswith(".ytdl") or name.endswith(".temp"):
-            continue
-        if name.endswith(".info.json") or name.endswith(".json"):
-            continue
-        if name.endswith(".jpg") or name.endswith(".jpeg") or name.endswith(".webp"):
+
+        if any(
+            name.endswith(suffix)
+            for suffix in (
+                ".part",
+                ".ytdl",
+                ".temp",
+                ".info.json",
+                ".json",
+                ".jpg",
+                ".jpeg",
+                ".webp",
+            )
+        ):
             continue
 
         if p.suffix.lower() in ALLOWED_EXTS:
-            files.append(p)
+            candidates.append(p)
 
-    if not files:
+    if not candidates:
         for p in root.rglob("*"):
             if p.is_file():
                 name = p.name.lower()
-                if name.endswith(".part") or name.endswith(".ytdl") or name.endswith(".temp"):
+                if any(
+                    name.endswith(suffix)
+                    for suffix in (".part", ".ytdl", ".temp", ".info.json", ".json")
+                ):
                     continue
-                if name.endswith(".info.json") or name.endswith(".json"):
-                    continue
-                files.append(p)
+                candidates.append(p)
 
-    if not files:
+    if not candidates:
         return None
 
-    return str(max(files, key=lambda x: x.stat().st_size))
+    return str(max(candidates, key=lambda x: x.stat().st_size))
 
 
-def download_once(url: str, tmpdir: str, cap_height: int, loop, progress_message):
+def download_once(url: str, tmpdir: str, cap_height: int, loop, progress_message, ffmpeg_location: str):
     reporter = ProgressReporter(
         loop=loop,
         message=progress_message,
         label=f"⏳ Скачиваю видео... (до {cap_height}p)",
     )
 
-    opts = build_ydl_opts(tmpdir, cap_height, reporter.hook)
+    opts = build_ydl_opts(tmpdir, cap_height, reporter.hook, ffmpeg_location)
 
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -191,7 +239,7 @@ def download_once(url: str, tmpdir: str, cap_height: int, loop, progress_message
     return final_file, title
 
 
-async def download_with_fallback(url: str, loop, progress_message):
+async def download_with_fallback(url: str, loop, progress_message, ffmpeg_location: str):
     last_error = None
 
     for cap in QUALITY_ORDER:
@@ -204,6 +252,7 @@ async def download_with_fallback(url: str, loop, progress_message):
                 cap,
                 loop,
                 progress_message,
+                ffmpeg_location,
             )
 
             size_bytes = os.path.getsize(final_file)
@@ -211,7 +260,7 @@ async def download_with_fallback(url: str, loop, progress_message):
             if cap == 1080 and size_bytes > MAX_SIZE_BYTES:
                 await safe_edit_text(
                     progress_message,
-                    "⚠️ 1080p получилось больше 50 MB, пробую 720p...",
+                    "⚠️ 1080p вышло больше 50 MB, пробую 720p...",
                 )
                 shutil.rmtree(tmpdir, ignore_errors=True)
                 continue
@@ -253,12 +302,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tmpdir_to_cleanup = None
 
     try:
+        ffmpeg_location = check_ffmpeg_or_raise()
+
         await context.bot.send_chat_action(
             chat_id=update.effective_chat.id,
             action=ChatAction.UPLOAD_VIDEO,
         )
 
-        result = await download_with_fallback(url, loop, status_message)
+        result = await download_with_fallback(
+            url,
+            loop,
+            status_message,
+            ffmpeg_location,
+        )
+
         tmpdir_to_cleanup = result["tmpdir"]
         downloaded_file = result["file"]
         title = result["title"]
@@ -308,6 +365,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     if not TOKEN or TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
         print("❌ Вставь токен!")
+        return
+
+    try:
+        check_ffmpeg_or_raise()
+    except Exception as e:
+        print(f"❌ {e}")
         return
 
     app = Application.builder().token(TOKEN).build()
