@@ -34,17 +34,25 @@ def parse_progress(line):
 
 def choose_format(url):
     cmd = ["python", "-m", "yt_dlp", "-J", "--no-playlist", url]
-    info = subprocess.check_output(cmd, text=True)
-    info = json.loads(info)
+    try:
+        info = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
+        info = json.loads(info)
+    except subprocess.CalledProcessError:
+        return "best[height<=480]/best", "480p", 0
+    
     size = 0
     for f in info.get("formats", []):
         if f.get("filesize"):
             size = max(size, f["filesize"])
+        elif f.get("filesize_approx"):
+            size = max(size, f["filesize_approx"])
+    
     size_mb = size / (1024 * 1024)
-    if size_mb <= 55:
+    
+    if size_mb <= 55 and size_mb > 0:
         return "bv*+ba/best", "1080p", size_mb
     else:
-        return "bv*[height<=720]+ba/best[height<=720]", "720p", size_mb
+        return "best[height<=720]/best", "720p", size_mb
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎬 Отправь YouTube ссылку — я скачаю видео")
