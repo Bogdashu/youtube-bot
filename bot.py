@@ -2,13 +2,19 @@ import os
 import re
 import tempfile
 import subprocess
-from dotenv import load_dotenv
+import shutil
+import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-load_dotenv()
+TOKEN = os.environ.get("BOT_TOKEN", "PASTE_YOUR_BOT_TOKEN_HERE")
 
-TOKEN = os.getenv("BOT_TOKEN")
+# Логирование для Railway
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 progress_regex = re.compile(r'(\d{1,3}(?:\.\d+)?)%')
 
@@ -23,26 +29,26 @@ def parse_progress(line):
 # ---------------- START ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🎬 Отправь ссылку YouTube, и я скачаю видео"
+        "🎬 Отправь YouTube ссылку — я скачаю видео"
     )
 
 
 # ---------------- DOWNLOAD ----------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text
+    url = update.message.text.strip()
 
     if "youtube" not in url and "youtu.be" not in url:
         await update.message.reply_text("❌ Это не YouTube ссылка")
         return
 
-    msg = await update.message.reply_text("⏳ Начинаю загрузку... 0%")
+    msg = await update.message.reply_text("⏳ Начинаю загрузку...")
 
     tmpdir = tempfile.mkdtemp(prefix="yt_")
     outtmpl = os.path.join(tmpdir, "video.%(ext)s")
 
     cmd = [
-        "yt-dlp",
-        "-f", "bestvideo+bestaudio/best",
+        "python", "-m", "yt_dlp",
+        "-f", "bv*[height<=1080]+ba/best",
         "-N", "8",
         "--merge-output-format", "mp4",
         "--newline",
@@ -77,31 +83,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
 
         if not downloaded_file:
-            await msg.edit_text("❌ Ошибка скачивания")
+            await msg.edit_text("❌ Ошибка: файл не найден")
             return
 
         await msg.edit_text("📤 Отправляю видео...")
 
-        await update.message.reply_video(
-            video=open(downloaded_file, "rb"),
-            caption="✅ Готово!"
-        )
+        with open(downloaded_file, "rb") as video_file:
+            await update.message.reply_video(
+                video=video_file,
+                caption="✅ Готово!"
+            )
+
+    except Exception as e:
+        logger.error(f"Ошибка: {e}")
+        await msg.edit_text(f"❌ Ошибка: {e}")
 
     finally:
-        try:
-            import shutil
-            shutil.rmtree(tmpdir)
-        except:
-            pass
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# ---------------- MAIN ----------------
 def main():
+    if not TOKEN or TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
+        print("❌ Токен не найден! Установи переменную BOT_TOKEN в Railway")
+        return
+
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("Bot started...")
+    print("🤖 Bot started on Railway...")
+    logger.info("Бот успешно запущен на Railway")
+    
+    # Railway сам перезапускает при падениях
     app.run_polling()
 
 
