@@ -6,7 +6,10 @@ import shutil
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-TOKEN = "8653225245:AAHRkN8UTXPYHMYpwB9fpRR4ICHB13Sckxc"
+TOKEN = os.environ.get("BOT_TOKEN")
+
+if not TOKEN:
+    raise ValueError("❌ Ошибка: переменная окружения BOT_TOKEN не установлена!")
 
 progress_regex = re.compile(r'(\d{1,3}(?:\.\d+)?)%')
 active_downloads = set()
