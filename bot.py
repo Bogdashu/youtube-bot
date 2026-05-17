@@ -79,7 +79,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "--socket-timeout", "20",
             "--retries", "3",
             "--newline",
-            "-f", fmt,
+            "-f", "bestvideo+bestaudio/best",
             "--merge-output-format", "mp4",
             "-o", outtmpl,
             url
