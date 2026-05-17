@@ -68,7 +68,11 @@ async def run_command(cmd):
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🎬 Отправь YouTube ссылку — я скачаю видео"
+        "🎬 Отправь YouTube ссылку — я скачаю видео\n\n"
+        "Поддерживаются:\n"
+        "- YouTube видео\n"
+        "- Shorts\n"
+        "- Плейлисты (первое видео)"
     )
 
 
@@ -82,88 +86,85 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Это не YouTube ссылка")
         return
 
-    msg = await update.message.reply_text("⏳ Скачиваю видео...")
+    msg = await update.message.reply_text("⏳ Получаю информацию о видео...")
 
     tmpdir = tempfile.mkdtemp(prefix="yt_")
 
     try:
         # =========================
-        # Получаем размер видео
+        # Получаем информацию о видео
         # =========================
-        probe_cmd = [
-            "python",
-            "-m",
-            "yt_dlp",
-            "--print",
-            "%(filesize_approx)s",
-            "-f",
-            "bestvideo+bestaudio/best",
-            url,
+        info_cmd = [
+            "python", "-m", "yt_dlp",
+            "--print", "%(filesize_approx)s",
+            "--print", "%(title)s",
+            "--print", "%(duration)s",
+            "-f", "bestvideo+bestaudio/best",
+            url
         ]
-
-        code, probe_output = await run_command(probe_cmd)
-
+        
+        code, info_output = await run_command(info_cmd)
+        
         filesize = 0
-
-        for line in probe_output:
-            if line.isdigit():
-                filesize = int(line)
-                break
+        title = "video"
+        duration = 0
+        
+        lines = [line for line in info_output if line.strip()]
+        for line in lines:
+            if line.isdigit() and len(line) > 3:
+                if filesize == 0:
+                    filesize = int(line)
+            elif line and not line.isdigit() and ":" not in line and len(line) > 3 and len(line) < 100:
+                title = re.sub(r'[\\/*?:"<>|]', "", line)[:50]
+            elif ":" in line and len(line) < 20:
+                try:
+                    parts = line.split(":")
+                    if len(parts) == 2:
+                        duration = int(parts[0]) * 60 + int(parts[1])
+                    elif len(parts) == 3:
+                        duration = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+                except:
+                    pass
 
         size_mb = format_mb(filesize) if filesize else 0
+        
+        # Если размер неизвестен, оцениваем по длительности
+        if size_mb == 0 and duration > 0:
+            # Примерная оценка: 10MB в минуту для 1080p
+            size_mb = round(duration / 60 * 10, 1)
 
         # =========================
         # Выбор качества
         # =========================
         if size_mb <= 100:
             quality = "1080p"
-
-            format_string = (
-                "bestvideo[height<=1080][ext=mp4]+"
-                "bestaudio[ext=m4a]/best[height<=1080]"
-            )
-
+            format_string = "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]"
         elif size_mb <= 180:
             quality = "720p"
-
-            format_string = (
-                "bestvideo[height<=720][ext=mp4]+"
-                "bestaudio[ext=m4a]/best[height<=720]"
-            )
-
+            format_string = "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]"
         else:
             quality = "480p"
-
-            format_string = (
-                "bestvideo[height<=480][ext=mp4]+"
-                "bestaudio[ext=m4a]/best[height<=480]"
-            )
+            format_string = "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480]"
 
         await msg.edit_text(
-            f"⏳ Скачиваю видео... ({size_mb} MB)"
+            f"⏳ Скачиваю {quality}...\n"
+            f"📊 Размер: ~{size_mb} MB\n"
+            f"📹 Название: {title}"
         )
 
         # =========================
-        # Скачивание
+        # Скачивание видео
         # =========================
-        outtmpl = os.path.join(tmpdir, "%(title)s.%(ext)s")
+        output_template = os.path.join(tmpdir, f"{title}.%(ext)s")
 
         cmd = [
-            "python",
-            "-m",
-            "yt_dlp",
-            "-f",
-            format_string,
-            "-N",
-            THREADS,
-            "--merge-output-format",
-            "mp4",
-            "--remux-video",
-            "mp4",
-            "--newline",
-            "-o",
-            outtmpl,
-            url,
+            "python", "-m", "yt_dlp",
+            "-f", format_string,
+            "-N", THREADS,
+            "--merge-output-format", "mp4",
+            "--remux-video", "mp4",
+            "-o", output_template,
+            url
         ]
 
         process = await asyncio.create_subprocess_exec(
@@ -176,27 +177,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         while True:
             line = await process.stdout.readline()
-
             if not line:
                 break
-
-            text = line.decode(
-                "utf-8",
-                errors="ignore"
-            ).strip()
-
+            
+            text = line.decode("utf-8", errors="ignore").strip()
             percent = parse_progress(text)
-
+            
             if percent is not None:
                 current = int(percent)
-
-                if current != last_percent:
+                if current != last_percent and current % 10 == 0:
                     last_percent = current
-
                     try:
                         await msg.edit_text(
-                            f"⏳ Скачиваю видео... ({size_mb} MB)\n"
-                            f"{current}%"
+                            f"⏳ Скачиваю {quality}...\n"
+                            f"📊 {current}%"
                         )
                     except:
                         pass
@@ -204,78 +198,90 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process.wait()
 
         # =========================
-        # Поиск готового видео
+        # Поиск скачанного файла
         # =========================
+        await asyncio.sleep(1)  # Ждем завершения записи
+        
         downloaded_file = None
-
-        video_extensions = (
-            ".mp4",
-            ".mkv",
-            ".webm",
-            ".mov"
-        )
-
-        for f in os.listdir(tmpdir):
-            path = os.path.join(tmpdir, f)
-
-            if (
-                os.path.isfile(path)
-                and f.lower().endswith(video_extensions)
-                and os.path.getsize(path) > 100000
-            ):
-                downloaded_file = path
+        all_files = []
+        
+        # Рекурсивно ищем все файлы
+        for root, dirs, files in os.walk(tmpdir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                all_files.append(file_path)
+                
+                # Проверяем видео расширения
+                if file.lower().endswith(('.mp4', '.mkv', '.webm', '.mov', '.avi')):
+                    file_size = os.path.getsize(file_path)
+                    if file_size > 100000:  # больше 100KB
+                        downloaded_file = file_path
+                        break
+            if downloaded_file:
                 break
+        
+        # Если не нашли по расширениям, берем самый большой файл
+        if not downloaded_file and all_files:
+            all_files.sort(key=lambda x: os.path.getsize(x) if os.path.isfile(x) else 0, reverse=True)
+            for f in all_files:
+                if os.path.isfile(f) and os.path.getsize(f) > 100000:
+                    downloaded_file = f
+                    break
 
         if not downloaded_file:
-            files = os.listdir(tmpdir)
-
+            # Логируем для отладки
+            debug_files = [os.path.basename(f) for f in all_files]
             await msg.edit_text(
                 f"❌ Видео не найдено\n"
-                f"Файлы: {files}"
+                f"Файлы в папке: {debug_files[:5]}"
             )
             return
 
-        final_size = format_mb(
-            os.path.getsize(downloaded_file)
-        )
+        final_size = format_mb(os.path.getsize(downloaded_file))
 
         # =========================
-        # Слишком большой файл
+        # Проверка размера для Telegram
         # =========================
         if final_size > 1900:
             await msg.edit_text(
-                "❌ Видео слишком большое для Telegram"
+                f"❌ Видео слишком большое для Telegram\n"
+                f"📦 Размер: {final_size} MB (макс. 1900 MB)"
             )
             return
 
         # =========================
-        # Отправка
+        # Отправка видео
         # =========================
         await msg.edit_text(
-            f"📤 Отправляю видео... ({quality})"
+            f"📤 Отправляю видео...\n"
+            f"🎬 {quality}\n"
+            f"📦 {final_size} MB"
         )
 
         with open(downloaded_file, "rb") as video_file:
             await update.message.reply_video(
                 video=video_file,
-                caption=(
-                    f"✅ Готово!\n"
-                    f"📦 Размер: {final_size} MB"
-                ),
+                caption=f"✅ Готово!\n"
+                       f"🎬 Качество: {quality}\n"
+                       f"📦 Размер: {final_size} MB\n"
+                       f"📹 {title}",
                 supports_streaming=True,
                 read_timeout=600,
                 write_timeout=600,
-                connect_timeout=600,
-                pool_timeout=600,
             )
 
         await msg.delete()
 
     except Exception as e:
-        await msg.edit_text(f"❌ Ошибка: {e}")
-
+        error_text = str(e)
+        print(f"Ошибка: {error_text}")
+        await msg.edit_text(f"❌ Ошибка: {error_text[:200]}")
+        
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except:
+            pass
 
 
 # =========================
@@ -283,23 +289,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 def main():
     if not TOKEN or TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
-        print("❌ Вставь токен!")
+        print("❌ Ошибка: Вставь токен бота в переменную TOKEN")
+        print("Способы:\n")
+        print("1. Через переменную окружения:")
+        print("   export BOT_TOKEN='твой_токен'")
+        print("   python bot.py\n")
+        print("2. Прямо в коде:")
+        print("   TOKEN = 'твой_токен'")
         return
 
+    # Создаем приложение
     app = Application.builder().token(TOKEN).build()
 
-    app.add_handler(
-        CommandHandler("start", start)
-    )
+    # Добавляем обработчики
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_message
-        )
-    )
-
-    print("🤖 Bot started...")
+    print("🤖 Бот запущен...")
+    print(f"📝 Используется потоков: {THREADS}")
+    print("✅ Готов к работе!")
+    
+    # Запускаем бота
     app.run_polling()
 
 
