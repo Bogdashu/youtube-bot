@@ -95,7 +95,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Получаем информацию о видео
         # =========================
         info_cmd = [
-            "python", "-m", "yt_dlp",
+            "yt-dlp",
             "--print", "%(filesize_approx)s",
             "--print", "%(title)s",
             "--print", "%(duration)s",
@@ -111,9 +111,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         lines = [line for line in info_output if line.strip()]
         for line in lines:
-            if line.isdigit() and len(line) > 3:
-                if filesize == 0:
-                    filesize = int(line)
+            if line.isdigit() and len(line) > 3 and filesize == 0:
+                filesize = int(line)
             elif line and not line.isdigit() and ":" not in line and len(line) > 3 and len(line) < 100:
                 title = re.sub(r'[\\/*?:"<>|]', "", line)[:50]
             elif ":" in line and len(line) < 20:
@@ -128,23 +127,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         size_mb = format_mb(filesize) if filesize else 0
         
-        # Если размер неизвестен, оцениваем по длительности
         if size_mb == 0 and duration > 0:
-            # Примерная оценка: 10MB в минуту для 1080p
             size_mb = round(duration / 60 * 10, 1)
 
         # =========================
-        # Выбор качества
+        # Выбор качества с аудио
         # =========================
         if size_mb <= 100:
             quality = "1080p"
-            format_string = "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]"
+            # ИСПРАВЛЕНО: правильный формат для получения видео с аудио
+            format_string = "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best"
         elif size_mb <= 180:
             quality = "720p"
-            format_string = "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]"
+            format_string = "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best"
         else:
             quality = "480p"
-            format_string = "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480]"
+            format_string = "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best"
 
         await msg.edit_text(
             f"⏳ Скачиваю {quality}...\n"
@@ -153,16 +151,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         # =========================
-        # Скачивание видео
+        # Скачивание видео с аудио
         # =========================
         output_template = os.path.join(tmpdir, f"{title}.%(ext)s")
 
         cmd = [
-            "python", "-m", "yt_dlp",
+            "yt-dlp",
             "-f", format_string,
             "-N", THREADS,
             "--merge-output-format", "mp4",
-            "--remux-video", "mp4",
+            "--embed-metadata",
             "-o", output_template,
             url
         ]
@@ -198,56 +196,81 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process.wait()
 
         # =========================
-        # Поиск скачанного файла
+        # Поиск скачанного файла (улучшенный)
         # =========================
-        await asyncio.sleep(1)  # Ждем завершения записи
+        await asyncio.sleep(2)  # Увеличил задержку
         
         downloaded_file = None
         all_files = []
         
-        # Рекурсивно ищем все файлы
+        # Рекурсивный поиск всех файлов
         for root, dirs, files in os.walk(tmpdir):
             for file in files:
                 file_path = os.path.join(root, file)
-                all_files.append(file_path)
-                
-                # Проверяем видео расширения
-                if file.lower().endswith(('.mp4', '.mkv', '.webm', '.mov', '.avi')):
-                    file_size = os.path.getsize(file_path)
-                    if file_size > 100000:  # больше 100KB
-                        downloaded_file = file_path
-                        break
-            if downloaded_file:
-                break
+                file_size = os.path.getsize(file_path)
+                all_files.append((file_path, file_size, file))
         
-        # Если не нашли по расширениям, берем самый большой файл
+        # Сортируем по размеру (от большего к меньшему)
+        all_files.sort(key=lambda x: x[1], reverse=True)
+        
+        # Ищем самый большой видеофайл
+        for file_path, file_size, file_name in all_files:
+            if file_size > 500000:  # больше 500KB
+                # Проверяем расширение или наличие video в mime
+                if file_name.lower().endswith(('.mp4', '.mkv', '.webm', '.mov', '.avi')):
+                    downloaded_file = file_path
+                    break
+        
+        # Если не нашли по расширению, берем самый большой файл
         if not downloaded_file and all_files:
-            all_files.sort(key=lambda x: os.path.getsize(x) if os.path.isfile(x) else 0, reverse=True)
-            for f in all_files:
-                if os.path.isfile(f) and os.path.getsize(f) > 100000:
-                    downloaded_file = f
+            for file_path, file_size, file_name in all_files:
+                if file_size > 1000000:  # больше 1MB
+                    downloaded_file = file_path
                     break
 
         if not downloaded_file:
-            # Логируем для отладки
-            debug_files = [os.path.basename(f) for f in all_files]
+            debug_info = "\n".join([f"- {f[2]} ({format_mb(f[1])} MB)" for f in all_files[:5]])
             await msg.edit_text(
-                f"❌ Видео не найдено\n"
-                f"Файлы в папке: {debug_files[:5]}"
+                f"❌ Видео не найдено\n\n"
+                f"Найденные файлы:\n{debug_info}"
             )
             return
 
         final_size = format_mb(os.path.getsize(downloaded_file))
 
         # =========================
-        # Проверка размера для Telegram
+        # Проверка размера
         # =========================
         if final_size > 1900:
             await msg.edit_text(
-                f"❌ Видео слишком большое для Telegram\n"
-                f"📦 Размер: {final_size} MB (макс. 1900 MB)"
+                f"❌ Видео слишком большое\n"
+                f"📦 {final_size} MB (макс. 1900 MB)"
             )
             return
+
+        # =========================
+        # Проверка наличия аудио (через ffprobe)
+        # =========================
+        has_audio = False
+        try:
+            probe_cmd = [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "stream=codec_type",
+                "-of", "default=noprint_wrappers=1",
+                downloaded_file
+            ]
+            process = await asyncio.create_subprocess_exec(
+                *probe_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await process.communicate()
+            has_audio = "codec_type=audio" in stdout.decode()
+        except:
+            pass
+
+        audio_status = "🔊 с аудио" if has_audio else "🔇 без аудио"
 
         # =========================
         # Отправка видео
@@ -255,16 +278,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(
             f"📤 Отправляю видео...\n"
             f"🎬 {quality}\n"
-            f"📦 {final_size} MB"
+            f"📦 {final_size} MB\n"
+            f"{audio_status}"
         )
 
         with open(downloaded_file, "rb") as video_file:
             await update.message.reply_video(
                 video=video_file,
                 caption=f"✅ Готово!\n"
-                       f"🎬 Качество: {quality}\n"
-                       f"📦 Размер: {final_size} MB\n"
-                       f"📹 {title}",
+                       f"🎬 {quality}\n"
+                       f"📦 {final_size} MB\n"
+                       f"{audio_status}\n"
+                       f"📹 {title[:40]}",
                 supports_streaming=True,
                 read_timeout=600,
                 write_timeout=600,
@@ -289,27 +314,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 def main():
     if not TOKEN or TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
-        print("❌ Ошибка: Вставь токен бота в переменную TOKEN")
-        print("Способы:\n")
-        print("1. Через переменную окружения:")
-        print("   export BOT_TOKEN='твой_токен'")
-        print("   python bot.py\n")
-        print("2. Прямо в коде:")
-        print("   TOKEN = 'твой_токен'")
+        print("❌ Ошибка: Вставь токен бота")
+        print("\nВариант 1 - переменная окружения:")
+        print("  export BOT_TOKEN='твой_токен'")
+        print("  python bot.py")
+        print("\nВариант 2 - прямо в коде:")
+        print("  TOKEN = 'твой_токен'")
         return
 
-    # Создаем приложение
     app = Application.builder().token(TOKEN).build()
 
-    # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("🤖 Бот запущен...")
-    print(f"📝 Используется потоков: {THREADS}")
-    print("✅ Готов к работе!")
+    print(f"📝 Потоков: {THREADS}")
     
-    # Запускаем бота
+    # Проверка наличия ffmpeg/ffprobe
+    print("\n🔍 Проверка зависимостей:")
+    
+    import shutil as sh
+    ffmpeg_path = sh.which("ffmpeg")
+    ffprobe_path = sh.which("ffprobe")
+    ytdlp_path = sh.which("yt-dlp")
+    
+    if ytdlp_path:
+        print(f"  ✅ yt-dlp: {ytdlp_path}")
+    else:
+        print(f"  ❌ yt-dlp не найден! Установите: pip install yt-dlp")
+    
+    if ffmpeg_path:
+        print(f"  ✅ ffmpeg: {ffmpeg_path}")
+    else:
+        print(f"  ❌ ffmpeg не найден! Установите:")
+        print(f"     Ubuntu: sudo apt install ffmpeg")
+        print(f"     Mac: brew install ffmpeg")
+        print(f"     Windows: скачайте с ffmpeg.org")
+    
+    if ffprobe_path:
+        print(f"  ✅ ffprobe: {ffprobe_path}")
+    
+    print("\n✅ Бот готов к работе!")
+    
     app.run_polling()
 
 
