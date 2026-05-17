@@ -1,386 +1,221 @@
 import asyncio
-import logging
 import os
 import shutil
 import tempfile
-import time
 from pathlib import Path
-from typing import Optional
 
 from telegram import Update
-from telegram.constants import ChatAction
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from yt_dlp import YoutubeDL
 
-# =======================
-# TOKEN
-# =======================
-TOKEN = os.getenv("BOT_TOKEN", "PASTE_YOUR_BOT_TOKEN_HERE")
+TOKEN = os.getenv("BOT_TOKEN")
 
-# =======================
-# SETTINGS
-# =======================
-MAX_SIZE_BYTES = 50 * 1024 * 1024
-QUALITY_ORDER = (1080, 720)
-ALLOWED_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v"}
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-logger = logging.getLogger("ytbot")
+MAX_SIZE_1080 = 50 * 1024 * 1024
 
 
-def is_youtube_url(url: str) -> bool:
-    url = url.lower()
-    return any(
-        part in url
-        for part in (
-            "youtube.com",
-            "youtu.be",
-            "youtube-nocookie.com",
-            "m.youtube.com",
-        )
+# =========================
+# START
+# =========================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎬 Отправь YouTube ссылку"
     )
 
 
-def find_ffmpeg_location() -> Optional[str]:
-    """
-    Возвращает путь к ffmpeg, если он доступен в PATH.
-    Если ffmpeg лежит рядом с ботом или в отдельной папке, можно задать FFMPEG_PATH.
-    """
-    custom = os.getenv("FFMPEG_PATH")
-    if custom:
-        ffmpeg_bin = Path(custom)
-        if ffmpeg_bin.is_file():
-            return str(ffmpeg_bin.parent)
-        if ffmpeg_bin.is_dir():
-            return str(ffmpeg_bin)
-
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg:
-        return str(Path(ffmpeg).parent)
-
-    return None
-
-
-def check_ffmpeg_or_raise() -> str:
-    ffmpeg_location = find_ffmpeg_location()
-    if not ffmpeg_location:
-        raise RuntimeError(
-            "ffmpeg не найден. Установи ffmpeg и ffprobe или задай FFMPEG_PATH."
-        )
-    return ffmpeg_location
-
-
-async def safe_edit_text(message, text: str) -> None:
-    try:
-        await message.edit_text(text)
-    except Exception:
-        pass
-
-
-async def safe_delete_message(message) -> None:
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
-
-class ProgressReporter:
-    def __init__(self, loop: asyncio.AbstractEventLoop, message, label: str):
-        self.loop = loop
-        self.message = message
-        self.label = label
-        self.last_percent = -1.0
-        self.last_update_ts = 0.0
-
-    def hook(self, data: dict) -> None:
-        status = data.get("status")
-
-        if status == "downloading":
-            downloaded = data.get("downloaded_bytes", 0) or 0
-            total = data.get("total_bytes") or data.get("total_bytes_estimate")
-            percent = None
-
-            if total and total > 0:
-                percent = (downloaded / total) * 100.0
-
-            now = time.monotonic()
-            should_update = False
-
-            if percent is not None:
-                if (percent - self.last_percent) >= 5.0:
-                    should_update = True
-                if (now - self.last_update_ts) >= 7.0:
-                    should_update = True
-            else:
-                if (now - self.last_update_ts) >= 10.0:
-                    should_update = True
-
-            if should_update:
-                self.last_update_ts = now
-                if percent is not None:
-                    self.last_percent = percent
-                    text = f"{self.label}\n{percent:.1f}%"
-                else:
-                    text = f"{self.label}\n⏳ Скачиваю..."
-
-                asyncio.run_coroutine_threadsafe(
-                    safe_edit_text(self.message, text),
-                    self.loop,
-                )
-
-        elif status == "finished":
-            asyncio.run_coroutine_threadsafe(
-                safe_edit_text(
-                    self.message,
-                    f"{self.label}\n✅ Скачано, объединяю звук и видео...",
-                ),
-                self.loop,
-            )
-
-
-def build_ydl_opts(tmpdir: str, cap_height: int, progress_hook, ffmpeg_location: str) -> dict:
-    # Всегда стараемся взять видео + аудио вместе.
-    # bv*+ba = лучший видео+лучший аудио поток
-    # /b      = fallback на прогрессивный файл, если он есть
-    format_selector = (
-        f"bv*[height<={cap_height}]+ba/"
-        f"b[height<={cap_height}]/"
-        f"bv*+ba/"
-        f"b"
+# =========================
+# CHECK URL
+# =========================
+def is_youtube(url: str):
+    return (
+        "youtube.com" in url
+        or "youtu.be" in url
     )
 
-    return {
-        "format": format_selector,
-        "merge_output_format": "mp4",
-        "ffmpeg_location": ffmpeg_location,
-        "outtmpl": os.path.join(tmpdir, "%(id)s.%(ext)s"),
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "continuedl": True,
-        "retries": 10,
-        "fragment_retries": 10,
-        "file_access_retries": 10,
-        "extractor_retries": 10,
-        "concurrent_fragment_downloads": 4,
-        "socket_timeout": 20,
-        "progress_hooks": [progress_hook],
-        "keepvideo": False,
-    }
 
+# =========================
+# FIND VIDEO
+# =========================
+def find_video(folder):
+    exts = [".mp4", ".mkv", ".webm"]
 
-def find_final_media_file(tmpdir: str) -> Optional[str]:
-    root = Path(tmpdir)
-    candidates = []
+    files = []
 
-    for p in root.rglob("*"):
-        if not p.is_file():
-            continue
+    for p in Path(folder).rglob("*"):
+        if p.is_file():
+            if p.suffix.lower() in exts:
+                files.append(p)
 
-        name = p.name.lower()
-
-        if any(
-            name.endswith(suffix)
-            for suffix in (
-                ".part",
-                ".ytdl",
-                ".temp",
-                ".info.json",
-                ".json",
-                ".jpg",
-                ".jpeg",
-                ".webp",
-            )
-        ):
-            continue
-
-        if p.suffix.lower() in ALLOWED_EXTS:
-            candidates.append(p)
-
-    if not candidates:
-        for p in root.rglob("*"):
-            if p.is_file():
-                name = p.name.lower()
-                if any(
-                    name.endswith(suffix)
-                    for suffix in (".part", ".ytdl", ".temp", ".info.json", ".json")
-                ):
-                    continue
-                candidates.append(p)
-
-    if not candidates:
+    if not files:
         return None
 
-    return str(max(candidates, key=lambda x: x.stat().st_size))
+    return str(max(files, key=lambda x: x.stat().st_size))
 
 
-def download_once(url: str, tmpdir: str, cap_height: int, loop, progress_message, ffmpeg_location: str):
-    reporter = ProgressReporter(
-        loop=loop,
-        message=progress_message,
-        label=f"⏳ Скачиваю видео... (до {cap_height}p)",
+# =========================
+# DOWNLOAD
+# =========================
+def download_video(url, folder, quality):
+    outtmpl = os.path.join(
+        folder,
+        "%(title)s.%(ext)s"
     )
 
-    opts = build_ydl_opts(tmpdir, cap_height, reporter.hook, ffmpeg_location)
+    ydl_opts = {
+        # Видео + звук
+        "format": (
+            f"bv*[height<={quality}]+ba/"
+            f"b[height<={quality}]/"
+            "best"
+        ),
 
-    with YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        title = info.get("title") or "Видео"
+        # Склейка
+        "merge_output_format": "mp4",
+
+        "outtmpl": outtmpl,
+
+        "quiet": True,
+        "noplaylist": True,
+
+        # Стабильность
+        "retries": 15,
+        "fragment_retries": 15,
+        "extractor_retries": 15,
+
+        "socket_timeout": 30,
+
+        # ffmpeg mp4
+        "postprocessors": [{
+            "key": "FFmpegVideoConvertor",
+            "preferedformat": "mp4",
+        }],
+    }
+
+    with YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
 
-    final_file = find_final_media_file(tmpdir)
-    if not final_file or not os.path.exists(final_file):
-        raise FileNotFoundError("Файл после скачивания не найден")
-
-    return final_file, title
+    return find_video(folder)
 
 
-async def download_with_fallback(url: str, loop, progress_message, ffmpeg_location: str):
-    last_error = None
+# =========================
+# HANDLE
+# =========================
+async def handle_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    url = update.message.text.strip()
 
-    for cap in QUALITY_ORDER:
-        tmpdir = tempfile.mkdtemp(prefix=f"yt_{cap}_")
-        try:
-            final_file, title = await asyncio.to_thread(
-                download_once,
-                url,
-                tmpdir,
-                cap,
-                loop,
-                progress_message,
-                ffmpeg_location,
+    if not is_youtube(url):
+        await update.message.reply_text(
+            "❌ Это не YouTube ссылка"
+        )
+        return
+
+    msg = await update.message.reply_text(
+        "⏳ Скачиваю..."
+    )
+
+    tmpdir = tempfile.mkdtemp(prefix="yt_")
+
+    try:
+        # =========================
+        # TRY 1080P
+        # =========================
+        await msg.edit_text(
+            "⏳ Пробую 1080p..."
+        )
+
+        video = await asyncio.to_thread(
+            download_video,
+            url,
+            tmpdir,
+            1080
+        )
+
+        if not video:
+            raise Exception("Видео не найдено")
+
+        size = os.path.getsize(video)
+
+        # =========================
+        # IF > 50MB => 720P
+        # =========================
+        if size > MAX_SIZE_1080:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+            tmpdir = tempfile.mkdtemp(prefix="yt_")
+
+            await msg.edit_text(
+                "⚠️ Видео >50MB\n⏳ Перехожу на 720p..."
             )
 
-            size_bytes = os.path.getsize(final_file)
+            video = await asyncio.to_thread(
+                download_video,
+                url,
+                tmpdir,
+                720
+            )
 
-            if cap == 1080 and size_bytes > MAX_SIZE_BYTES:
-                await safe_edit_text(
-                    progress_message,
-                    "⚠️ 1080p вышло больше 50 MB, пробую 720p...",
-                )
-                shutil.rmtree(tmpdir, ignore_errors=True)
-                continue
+            if not video:
+                raise Exception("720p видео не найдено")
 
-            return {
-                "tmpdir": tmpdir,
-                "file": final_file,
-                "title": title,
-                "size_bytes": size_bytes,
-                "quality": cap,
-            }
-
-        except Exception as e:
-            last_error = e
-            shutil.rmtree(tmpdir, ignore_errors=True)
-            logger.exception("Download failed for cap=%s", cap)
-
-    if last_error:
-        raise last_error
-
-    raise RuntimeError("Не удалось скачать видео")
-
-
-# ---------------- START ----------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎬 Отправь YouTube ссылку — я скачаю видео")
-
-
-# ---------------- DOWNLOAD ----------------
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = (update.message.text or "").strip()
-
-    if not is_youtube_url(url):
-        await update.message.reply_text("❌ Это не YouTube ссылка")
-        return
-
-    status_message = await update.message.reply_text("⏳ Подготавливаю скачивание...")
-    loop = asyncio.get_running_loop()
-    tmpdir_to_cleanup = None
-
-    try:
-        ffmpeg_location = check_ffmpeg_or_raise()
-
-        await context.bot.send_chat_action(
-            chat_id=update.effective_chat.id,
-            action=ChatAction.UPLOAD_VIDEO,
+        # =========================
+        # SEND
+        # =========================
+        await msg.edit_text(
+            "📤 Отправляю..."
         )
 
-        result = await download_with_fallback(
-            url,
-            loop,
-            status_message,
-            ffmpeg_location,
-        )
+        with open(video, "rb") as f:
+            await update.message.reply_video(
+                video=f,
+                caption="✅ Готово",
+                supports_streaming=True,
+                read_timeout=600,
+                write_timeout=600,
+            )
 
-        tmpdir_to_cleanup = result["tmpdir"]
-        downloaded_file = result["file"]
-        title = result["title"]
-        quality = result["quality"]
-        size_mb = result["size_bytes"] / (1024 * 1024)
-
-        await safe_edit_text(
-            status_message,
-            f"📤 Отправляю видео... ({quality}p)",
-        )
-
-        caption = f"✅ Готово!\n{title}\n{quality}p • {size_mb:.1f} MB"
-
-        try:
-            with open(downloaded_file, "rb") as video:
-                await update.message.reply_video(
-                    video=video,
-                    caption=caption,
-                    supports_streaming=True,
-                    read_timeout=600,
-                    write_timeout=600,
-                    connect_timeout=60,
-                    pool_timeout=60,
-                )
-        except Exception:
-            with open(downloaded_file, "rb") as video:
-                await update.message.reply_document(
-                    document=video,
-                    caption=caption,
-                    read_timeout=600,
-                    write_timeout=600,
-                    connect_timeout=60,
-                    pool_timeout=60,
-                )
-
-        await safe_delete_message(status_message)
+        await msg.delete()
 
     except Exception as e:
-        await safe_edit_text(status_message, f"❌ Ошибка: {e}")
+        await msg.edit_text(
+            f"❌ Ошибка:\n{e}"
+        )
 
     finally:
-        if tmpdir_to_cleanup:
-            shutil.rmtree(tmpdir_to_cleanup, ignore_errors=True)
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-# ---------------- MAIN ----------------
+# =========================
+# MAIN
+# =========================
 def main():
-    if not TOKEN or TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
-        print("❌ Вставь токен!")
-        return
-
-    try:
-        check_ffmpeg_or_raise()
-    except Exception as e:
-        print(f"❌ {e}")
+    if not TOKEN:
+        print("BOT_TOKEN not found")
         return
 
     app = Application.builder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
     app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+        CommandHandler("start", start)
     )
 
-    print("🤖 Bot started...")
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_message
+        )
+    )
+
+    print("BOT STARTED")
+
     app.run_polling()
 
 
