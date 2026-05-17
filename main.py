@@ -21,7 +21,7 @@ TOKEN = os.getenv("BOT_TOKEN", "PASTE_YOUR_BOT_TOKEN_HERE")
 # =========================
 # SETTINGS
 # =========================
-MAX_BEST_MB = 100
+MAX_BEST_MB = 60
 THREADS = "8"
 
 progress_regex = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
