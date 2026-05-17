@@ -58,12 +58,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "video.%(ext)s"
     )
 
-    # =========================
-    # 720p + звук + видео
-    # =========================
+    # =========================================
+    # Сначала пробуем 1080p
+    # Если нет -> fallback на 720p
+    # Всегда со звуком и видео
+    # =========================================
     format_string = (
+        # 1080p mp4
+        "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
+
+        # 1080p любое
+        "bestvideo[height<=1080]+bestaudio/"
+
+        # fallback 720 mp4
         "best[height<=720][ext=mp4]/"
+
+        # fallback любое mp4
         "best[ext=mp4]/"
+
+        # самый последний fallback
         "best"
     )
 
@@ -71,13 +84,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "python",
         "-m",
         "yt_dlp",
+
         "-f",
         format_string,
+
         "-N",
         "8",
+
+        "--merge-output-format",
+        "mp4",
+
+        "--remux-video",
+        "mp4",
+
         "--newline",
+
         "-o",
         outtmpl,
+
         url
     ]
 
@@ -90,9 +114,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     downloaded_file = None
+    quality = "1080p"
 
     try:
         for line in process.stdout:
+
+            # если yt-dlp пишет 720
+            if "720" in line:
+                quality = "720p"
+
             percent = parse_progress(line)
 
             if percent is not None:
@@ -109,15 +139,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Ищем видео
         # =========================
         for f in os.listdir(tmpdir):
+
             path = os.path.join(tmpdir, f)
 
             if (
                 os.path.isfile(path)
-                and (
-                    f.endswith(".mp4")
-                    or f.endswith(".mkv")
-                    or f.endswith(".webm")
-                )
+                and f.endswith(".mp4")
             ):
                 downloaded_file = path
                 break
@@ -129,16 +156,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # =========================
+        # Размер файла
+        # =========================
+        size_mb = round(
+            os.path.getsize(downloaded_file) / 1024 / 1024,
+            1
+        )
+
+        # Telegram limit
+        if size_mb > 49:
+            await msg.edit_text(
+                f"❌ Видео слишком большое ({size_mb} MB)"
+            )
+            return
+
+        # =========================
         # Отправка
         # =========================
         await msg.edit_text(
-            "📤 Отправляю видео... (720p)"
+            f"📤 Отправляю видео... ({quality})"
         )
 
         with open(downloaded_file, "rb") as video:
             await update.message.reply_video(
                 video=video,
-                caption="✅ Готово!",
+                caption=f"✅ Готово!\n📦 Размер: {size_mb} MB",
                 supports_streaming=True,
                 read_timeout=600,
                 write_timeout=600,
@@ -155,6 +197,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- MAIN ----------------
 def main():
+
     if not TOKEN or TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
         print("❌ Вставь токен!")
         return
