@@ -25,7 +25,6 @@ def parse_progress(line):
 
 
 def get_real_resolution(filepath):
-
     try:
         cmd = [
             "ffprobe",
@@ -36,35 +35,27 @@ def get_real_resolution(filepath):
             filepath,
         ]
 
-        result = subprocess.check_output(
-            cmd,
-            text=True
-        ).strip()
-
+        result = subprocess.check_output(cmd, text=True).strip()
         return f"{result}p" if result else "unknown"
 
     except:
         return "unknown"
 
 
-async def start(update: Update, context):
-
-    await update.message.reply_text(
-        "🎬 Отправь YouTube ссылку"
-    )
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🎬 Отправь YouTube ссылку")
 
 
-async def handle_message(update: Update, context):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     url = update.message.text.strip()
 
     if "youtube.com" not in url and "youtu.be" not in url:
-
         await update.message.reply_text("❌ Это не YouTube ссылка")
         return
 
     msg = await update.message.reply_text(
-        "📥 Скачивание видео...\n\n🎞 Подготовка...\n⏳ 0%"
+        "📥 Скачивание...\n🎞 Подготовка...\n⏳ 0%"
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -74,26 +65,25 @@ async def handle_message(update: Update, context):
         cookies_path = None
 
         if YT_COOKIES:
-
             cookies_path = os.path.join(tmpdir, "cookies.txt")
-
             with open(cookies_path, "w", encoding="utf-8") as f:
                 f.write(YT_COOKIES)
 
         cmd = [
             "yt-dlp",
+
             "--no-playlist",
 
             "--extractor-args",
             "youtube:player_client=ios,android",
 
-            "--extractor-args",
-            "youtube:player_skip=webpage,configs",
-
             "-N", "4",
 
+            "--format-sort",
+            "vcodec:h264,res,ext:mp4:m4a",
+
             "-f",
-            "bestvideo[height<=1080]+bestaudio/best",
+            "bv*[height<=1080]+ba/b[height<=1080]/b",
 
             "--merge-output-format",
             "mp4",
@@ -128,16 +118,11 @@ async def handle_message(update: Update, context):
             percent = parse_progress(line)
 
             if percent is not None:
-
                 if percent - last_percent >= 5:
-
                     last_percent = percent
-
                     try:
                         await msg.edit_text(
-                            f"📥 Скачивание видео...\n\n"
-                            f"🎞 Подготовка...\n"
-                            f"⏳ {percent:.1f}%"
+                            f"📥 Скачивание...\n🎞 Подготовка...\n⏳ {percent:.1f}%"
                         )
                     except:
                         pass
@@ -146,7 +131,7 @@ async def handle_message(update: Update, context):
 
         if process.returncode != 0:
 
-            error_text = "".join(last_lines[-3:])[:700]
+            error_text = "".join(last_lines[-3:])[:800]
 
             await msg.edit_text(
                 f"❌ Ошибка yt-dlp\n\n{error_text}"
@@ -156,13 +141,11 @@ async def handle_message(update: Update, context):
         video_file = None
 
         for f in os.listdir(tmpdir):
-
             if f.endswith((".mp4", ".mkv", ".webm")):
                 video_file = os.path.join(tmpdir, f)
                 break
 
         if not video_file:
-
             await msg.edit_text("❌ Видео не найдено")
             return
 
@@ -171,9 +154,7 @@ async def handle_message(update: Update, context):
         size_mb = os.path.getsize(video_file) / 1024 / 1024
 
         await msg.edit_text(
-            f"📤 Отправка видео...\n\n"
-            f"🎞 {real_quality}\n"
-            f"📦 {size_mb:.1f} MB"
+            f"📤 Отправка...\n🎞 {real_quality}\n📦 {size_mb:.1f} MB"
         )
 
         with open(video_file, "rb") as v:
@@ -227,7 +208,6 @@ LOCAL_APP = (
 
 
 def main():
-
     NORMAL_APP.add_handler(CommandHandler("start", start))
     NORMAL_APP.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
