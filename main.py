@@ -1,6 +1,5 @@
 import os
 import re
-import json
 import tempfile
 import subprocess
 
@@ -26,6 +25,38 @@ def parse_progress(line):
     return float(match.group(1)) if match else None
 
 
+def get_real_resolution(filepath):
+
+    try:
+
+        cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=height",
+            "-of",
+            "csv=p=0",
+            filepath,
+        ]
+
+        result = subprocess.check_output(
+            cmd,
+            text=True,
+        ).strip()
+
+        if result:
+            return f"{result}p"
+
+        return "unknown"
+
+    except:
+
+        return "unknown"
+
+
 async def start(update: Update, context):
 
     await update.message.reply_text(
@@ -46,7 +77,9 @@ async def handle_message(update: Update, context):
         return
 
     msg = await update.message.reply_text(
-        "📥 Подготовка..."
+        "📥 Скачивание видео...\n\n"
+        "🎞 Определение качества...\n"
+        "⏳ 0%"
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -54,36 +87,6 @@ async def handle_message(update: Update, context):
         outtmpl = os.path.join(
             tmpdir,
             "video.%(ext)s"
-        )
-
-        info_cmd = [
-            "yt-dlp",
-            "--dump-json",
-            url,
-        ]
-
-        try:
-
-            info_raw = subprocess.check_output(
-                info_cmd,
-                text=True,
-            )
-
-            info = json.loads(info_raw)
-
-            real_height = info.get(
-                "height",
-                "?"
-            )
-
-        except:
-
-            real_height = "?"
-
-        await msg.edit_text(
-            f"📥 Скачивание видео...\n\n"
-            f"🎞 Качество: {real_height}p\n"
-            f"⏳ 0%"
         )
 
         cmd = [
@@ -123,7 +126,7 @@ async def handle_message(update: Update, context):
 
                         await msg.edit_text(
                             f"📥 Скачивание видео...\n\n"
-                            f"🎞 Качество: {real_height}p\n"
+                            f"🎞 Определение качества...\n"
                             f"⏳ {percent:.1f}%"
                         )
 
@@ -167,23 +170,20 @@ async def handle_message(update: Update, context):
 
             return
 
+        real_quality = get_real_resolution(
+            video_file
+        )
+
         size_mb = (
             os.path.getsize(video_file)
             / 1024
             / 1024
         )
 
-        method = (
-            "Cloud API"
-            if size_mb <= 49
-            else "Local API"
-        )
-
         await msg.edit_text(
             f"📤 Отправка видео...\n\n"
-            f"🎞 {real_height}p\n"
-            f"📦 {size_mb:.1f} MB\n"
-            f"🚀 {method}"
+            f"🎞 {real_quality}\n"
+            f"📦 {size_mb:.1f} MB"
         )
 
         with open(video_file, "rb") as v:
@@ -194,7 +194,7 @@ async def handle_message(update: Update, context):
                     video=v,
                     caption=(
                         f"✅ Готово\n"
-                        f"🎞 {real_height}p\n"
+                        f"🎞 {real_quality}\n"
                         f"📦 {size_mb:.1f} MB"
                     ),
                     supports_streaming=True,
@@ -209,7 +209,7 @@ async def handle_message(update: Update, context):
                     video=v,
                     caption=(
                         f"✅ Готово\n"
-                        f"🎞 {real_height}p\n"
+                        f"🎞 {real_quality}\n"
                         f"📦 {size_mb:.1f} MB"
                     ),
                     supports_streaming=True,
