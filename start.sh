@@ -6,6 +6,6 @@ telegram-bot-api \
   --api-id=$TELEGRAM_API_ID \
   --api-hash=$TELEGRAM_API_HASH &
 
-sleep 5
+sleep 8
 
 python main.py
