@@ -6,8 +6,9 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install -r requirements.txt
+RUN pip install -U yt-dlp
 
 COPY . .
 
-CMD ["python","main.py"]
+CMD ["python", "main.py"]
