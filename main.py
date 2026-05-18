@@ -74,16 +74,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             "--no-playlist",
 
+            # СТАБИЛЬНЫЙ клиент (без android)
             "--extractor-args",
-            "youtube:player_client=ios,android",
+            "youtube:player_client=ios",
 
-            "-N", "4",
+            # fallback чтобы не падало
+            "-f",
+            "bv*+ba/b[ext=mp4]/b",
 
             "--format-sort",
-            "vcodec:h264,res,ext:mp4:m4a",
+            "res,ext:mp4:m4a",
 
-            "-f",
-            "bv*[height<=1080]+ba/b[height<=1080]/b",
+            "-N", "4",
 
             "--merge-output-format",
             "mp4",
@@ -118,8 +120,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             percent = parse_progress(line)
 
             if percent is not None:
+
                 if percent - last_percent >= 5:
                     last_percent = percent
+
                     try:
                         await msg.edit_text(
                             f"📥 Скачивание...\n🎞 Подготовка...\n⏳ {percent:.1f}%"
