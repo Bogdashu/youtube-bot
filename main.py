@@ -27,11 +27,11 @@ def parse_progress(line: str):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
-        "🎬 YouTube Downloader\n\n"
-        "✅ 1080p качество\n"
-        "✅ До 2GB\n"
-        "✅ Видео с предпросмотром\n\n"
-        "📩 Отправь ссылку YouTube"
+        "🎬 YouTube Downloader Bot\n\n"
+        "✅ Скачать видео 1080p\n"
+        "✅ Поддержка файлов до 2GB\n"
+        "✅ Быстрая загрузка\n\n"
+        "📩 Просто отправь ссылку YouTube"
     )
 
 
@@ -40,11 +40,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
 
     if "youtube.com" not in url and "youtu.be" not in url:
-
         await update.message.reply_text(
-            "❌ Отправь YouTube ссылку"
+            "❌ Это не YouTube ссылка"
         )
-
         return
 
     msg = await update.message.reply_text(
@@ -53,30 +51,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     with tempfile.TemporaryDirectory() as tmpdir:
 
-        # Получаем название
+        # Получение информации о видео
+        info_cmd = [
+            "yt-dlp",
+            "--print",
+            "%(title)s|||%(resolution)s|||%(filesize_approx)s",
+            url,
+        ]
+
         try:
 
-            title = subprocess.check_output(
-                [
-                    "yt-dlp",
-                    "--print",
-                    "%(title)s",
-                    url
-                ],
-                text=True
+            info_result = subprocess.check_output(
+                info_cmd,
+                text=True,
+                stderr=subprocess.DEVNULL
             ).strip()
 
+            parts = info_result.split("|||")
+
+            title = parts[0] if len(parts) > 0 else "Unknown"
+            quality = parts[1] if len(parts) > 1 else "1080p"
+
+            filesize = "Неизвестно"
+
+            if len(parts) > 2 and parts[2].isdigit():
+
+                size_mb = int(parts[2]) / (1024 * 1024)
+
+                if size_mb > 1024:
+                    filesize = f"{size_mb / 1024:.2f} GB"
+                else:
+                    filesize = f"{size_mb:.1f} MB"
+
         except:
-
             title = "YouTube Video"
-
-        # ВСЕГДА 1080p
-        quality = "1080p"
+            quality = "1080p"
+            filesize = "Неизвестно"
 
         await msg.edit_text(
-            f"🎬 {title}\n\n"
-            f"📺 Качество: {quality}\n\n"
-            f"⏳ Начинаю скачивание..."
+            f"🎬 Название:\n{title}\n\n"
+            f"📺 Качество: {quality}\n"
+            f"📦 Размер: {filesize}\n\n"
+            f"⏳ Подготовка к скачиванию..."
         )
 
         outtmpl = os.path.join(tmpdir, "video.%(ext)s")
@@ -84,7 +100,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cmd = [
             "yt-dlp",
             "-f",
-            "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+            "bestvideo[height<=1080]+bestaudio/best",
             "--merge-output-format",
             "mp4",
             "--newline",
@@ -104,6 +120,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         last_update = 0
+        last_percent = 0
 
         for line in process.stdout:
 
@@ -111,25 +128,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if percent is not None:
 
+                last_percent = percent
+
                 now = time.time()
 
+                # обновляем максимум раз в 5 секунд
                 if now - last_update >= 5:
 
                     try:
 
-                        filled = int(percent // 10)
-
-                        progress_bar = (
-                            "🟩" * filled
-                            + "⬜" * (10 - filled)
-                        )
+                        progress_bar = "▓" * int(percent // 10)
+                        progress_bar += "░" * (10 - int(percent // 10))
 
                         await msg.edit_text(
                             f"📥 Скачивание видео...\n\n"
                             f"🎬 {title}\n\n"
-                            f"📺 Качество: {quality}\n\n"
-                            f"{progress_bar}\n"
-                            f"⏳ {percent:.1f}%"
+                            f"📺 Качество: {quality}\n"
+                            f"📦 Размер: {filesize}\n\n"
+                            f"[{progress_bar}] {percent:.1f}%"
                         )
 
                         last_update = now
@@ -142,7 +158,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if process.returncode != 0:
 
             await msg.edit_text(
-                "❌ Ошибка скачивания"
+                "❌ Ошибка скачивания видео"
             )
 
             return
@@ -168,32 +184,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         real_size = os.path.getsize(video_file) / (1024 * 1024)
 
         if real_size > 1024:
-
-            size_text = f"{real_size / 1024:.2f} GB"
-
+            real_size_text = f"{real_size / 1024:.2f} GB"
         else:
-
-            size_text = f"{real_size:.1f} MB"
+            real_size_text = f"{real_size:.1f} MB"
 
         await msg.edit_text(
             f"📤 Отправка видео...\n\n"
             f"🎬 {title}\n\n"
             f"📺 Качество: {quality}\n"
-            f"📦 Размер: {size_text}"
+            f"📦 Размер: {real_size_text}"
         )
 
         with open(video_file, "rb") as v:
 
-            # ВАЖНО
-            # reply_video = preview
-            await update.message.reply_video(
-                video=v,
+            await update.message.reply_document(
+                document=v,
+                filename=f"{title}.mp4",
                 caption=(
-                    f"🎬 {title}\n\n"
+                    f"✅ Видео успешно скачано\n\n"
+                    f"🎬 {title}\n"
                     f"📺 Качество: {quality}\n"
-                    f"📦 Размер: {size_text}"
+                    f"📦 Размер: {real_size_text}"
                 ),
-                supports_streaming=True,
                 read_timeout=1200,
                 write_timeout=1200,
             )
@@ -202,6 +214,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+
+    if not TOKEN:
+
+        print("BOT_TOKEN отсутствует")
+
+        return
+
+    if not LOCAL_BOT_API_URL:
+
+        print("LOCAL_BOT_API_URL отсутствует")
+
+        return
 
     app = (
         Application.builder()
@@ -220,7 +244,7 @@ def main():
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            handle_message
+            handle_message,
         )
     )
 
