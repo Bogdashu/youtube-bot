@@ -19,9 +19,7 @@ progress_regex = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
 
 
 def parse_progress(line):
-
     match = progress_regex.search(line)
-
     return float(match.group(1)) if match else None
 
 
@@ -31,14 +29,10 @@ def get_real_resolution(filepath):
 
         cmd = [
             "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=height",
-            "-of",
-            "csv=p=0",
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=height",
+            "-of", "csv=p=0",
             filepath,
         ]
 
@@ -87,16 +81,31 @@ async def handle_message(update: Update, context):
         )
 
         cmd = [
+
             "yt-dlp",
+
             "--no-playlist",
-            "-N", "4",
+
+            "--extractor-args",
+            "youtube:player_client=ios,android",
+
+            "--extractor-args",
+            "youtube:player_skip=webpage,configs",
+
+            "-N",
+            "4",
+
             "-f",
             "bestvideo[height<=1080]+bestaudio/best",
+
             "--merge-output-format",
             "mp4",
+
             "--newline",
+
             "-o",
             outtmpl,
+
             url,
         ]
 
@@ -142,7 +151,7 @@ async def handle_message(update: Update, context):
 
             error_text = "".join(
                 last_lines[-3:]
-            )[:500]
+            )[:700]
 
             await msg.edit_text(
                 f"❌ Ошибка yt-dlp\n\n"
@@ -189,7 +198,7 @@ async def handle_message(update: Update, context):
         )
 
         await msg.edit_text(
-            f"📤 Отправка видео...\n\n"
+            f"📤 Загрузка в Telegram...\n\n"
             f"🎞 {real_quality}\n"
             f"📦 {size_mb:.1f} MB"
         )
@@ -208,6 +217,8 @@ async def handle_message(update: Update, context):
                     supports_streaming=True,
                     read_timeout=1200,
                     write_timeout=1200,
+                    connect_timeout=1200,
+                    pool_timeout=1200,
                 )
 
             else:
@@ -223,6 +234,8 @@ async def handle_message(update: Update, context):
                     supports_streaming=True,
                     read_timeout=1200,
                     write_timeout=1200,
+                    connect_timeout=1200,
+                    pool_timeout=1200,
                 )
 
         await msg.delete()
@@ -231,6 +244,10 @@ async def handle_message(update: Update, context):
 NORMAL_APP = (
     Application.builder()
     .token(TOKEN)
+    .connect_timeout(1200)
+    .read_timeout(1200)
+    .write_timeout(1200)
+    .pool_timeout(1200)
     .build()
 )
 
@@ -240,6 +257,10 @@ LOCAL_APP = (
     .base_url(f"{LOCAL_BOT_API_URL}/bot")
     .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
     .local_mode(True)
+    .connect_timeout(1200)
+    .read_timeout(1200)
+    .write_timeout(1200)
+    .pool_timeout(1200)
     .build()
 )
 
@@ -262,7 +283,9 @@ def main():
 
     print("BOT STARTED")
 
-    NORMAL_APP.run_polling()
+    NORMAL_APP.run_polling(
+        drop_pending_updates=True
+    )
 
 
 if __name__ == "__main__":
