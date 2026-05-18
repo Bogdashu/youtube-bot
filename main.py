@@ -47,10 +47,7 @@ def get_real_resolution(filepath):
             text=True,
         ).strip()
 
-        if result:
-            return f"{result}p"
-
-        return "unknown"
+        return f"{result}p" if result else "unknown"
 
     except:
 
@@ -91,13 +88,13 @@ async def handle_message(update: Update, context):
 
         cmd = [
             "yt-dlp",
+            "--no-playlist",
+            "-N", "4",
             "-f",
             "bestvideo[height<=1080]+bestaudio/best",
             "--merge-output-format",
             "mp4",
             "--newline",
-            "--extractor-args",
-            "youtube:player_client=android",
             "-o",
             outtmpl,
             url,
@@ -111,8 +108,14 @@ async def handle_message(update: Update, context):
         )
 
         last_percent = -5
+        last_lines = []
 
         for line in process.stdout:
+
+            last_lines.append(line)
+
+            if len(last_lines) > 10:
+                last_lines.pop(0)
 
             percent = parse_progress(line)
 
@@ -137,8 +140,13 @@ async def handle_message(update: Update, context):
 
         if process.returncode != 0:
 
+            error_text = "".join(
+                last_lines[-3:]
+            )[:500]
+
             await msg.edit_text(
-                "❌ Ошибка yt-dlp"
+                f"❌ Ошибка yt-dlp\n\n"
+                f"{error_text}"
             )
 
             return
@@ -229,12 +237,8 @@ NORMAL_APP = (
 LOCAL_APP = (
     Application.builder()
     .token(TOKEN)
-    .base_url(
-        f"{LOCAL_BOT_API_URL}/bot"
-    )
-    .base_file_url(
-        f"{LOCAL_BOT_API_URL}/file/bot"
-    )
+    .base_url(f"{LOCAL_BOT_API_URL}/bot")
+    .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
     .local_mode(True)
     .build()
 )
