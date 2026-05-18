@@ -3,6 +3,7 @@ import re
 import tempfile
 import subprocess
 import shutil
+import time
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
@@ -43,18 +44,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     msg = await update.message.reply_text("⏳ Скачиваю...")
+    
+    # СОЗДАЁМ НОВУЮ ВРЕМЕННУЮ ПАПКУ ДЛЯ КАЖДОГО ВИДЕО
     tmpdir = tempfile.mkdtemp(prefix="yt_")
     outtmpl = os.path.join(tmpdir, "video.%(ext)s")
     
     cmd = [
         "python", "-m", "yt_dlp",
         "-f", "best[height<=720][ext=mp4]/best",
-        "-N", "8", "--newline", "-o", outtmpl, url
+        "-N", "8", 
+        "--newline", 
+        "-o", outtmpl, 
+        url
     ]
     
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    process = subprocess.Popen(
+        cmd, 
+        stdout=subprocess.PIPE, 
+        stderr=subprocess.STDOUT, 
+        text=True, 
+        bufsize=1
+    )
+    
+    video_file = None
     
     try:
+        # Отслеживаем прогресс
         for line in process.stdout:
             if m := re.search(r"(\d{1,3}(?:\.\d+)?)%", line):
                 try:
@@ -64,7 +79,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         process.wait()
         
-        video_file = None
+        # Ищем скачанный файл
         for f in os.listdir(tmpdir):
             path = os.path.join(tmpdir, f)
             if os.path.isfile(path) and f.endswith(('.mp4', '.mkv')):
@@ -88,28 +103,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
             
+            # Отправляем все части
             for i, part in enumerate(parts, 1):
+                part_size = os.path.getsize(part) / (1024 * 1024)
+                await msg.edit_text(f"📤 Отправляю часть {i} из {len(parts)} ({part_size:.1f} MB)...")
+                
                 with open(part, "rb") as p:
-                    await update.message.reply_document(p, filename=f"part_{i:03d}_{len(parts)}.mp4")
+                    await update.message.reply_document(
+                        document=p, 
+                        filename=f"video_part_{i:03d}_{len(parts)}.mp4"
+                    )
+                
+                # Удаляем часть сразу после отправки (экономия места)
+                os.unlink(part)
             
+            # Удаляем папку с частями
             shutil.rmtree(parts_dir, ignore_errors=True)
-            await msg.delete()
+            await msg.edit_text("✅ Все части отправлены!")
+            
         else:
             await msg.edit_text(f"📤 Отправляю ({size_mb:.1f} MB)...")
             with open(video_file, "rb") as v:
-                await update.message.reply_video(v, caption=f"✅ {size_mb:.1f} MB")
+                await update.message.reply_video(
+                    video=v, 
+                    caption=f"✅ {size_mb:.1f} MB",
+                    supports_streaming=True
+                )
             await msg.delete()
             
     except Exception as e:
-        await msg.edit_text(f"❌ {str(e)[:100]}")
+        error_msg = str(e)
+        print(f"Error: {error_msg}")  # Логируем ошибку
+        await msg.edit_text(f"❌ {error_msg[:100]}")
     finally:
+        # ОЧИЩАЕМ ВСЕ ВРЕМЕННЫЕ ФАЙЛЫ
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 def main():
+    if not TOKEN:
+        print("❌ BOT_TOKEN не найден! Установи переменную окружения BOT_TOKEN")
+        return
+    
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("🤖 Бот запущен (без локального API, с разбивкой на части)")
+    print("🤖 Бот запущен (с разбивкой на части)")
     app.run_polling()
 
 if __name__ == "__main__":
