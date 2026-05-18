@@ -18,19 +18,19 @@ LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")
 progress_regex = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
 
 
-def parse_progress(line: str):
+def parse_progress(line):
     match = progress_regex.search(line)
     return float(match.group(1)) if match else None
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context):
 
     await update.message.reply_text(
         "🎬 Отправь YouTube ссылку"
     )
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_message(update: Update, context):
 
     url = update.message.text.strip()
 
@@ -39,7 +39,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ Это не YouTube ссылка"
         )
-
         return
 
     msg = await update.message.reply_text(
@@ -79,7 +78,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if percent is not None:
 
-                # антиспам: обновлять только каждые 5%
                 if percent - last_percent >= 5:
 
                     last_percent = percent
@@ -110,17 +108,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(
                 "❌ Ошибка скачивания"
             )
-
             return
 
-        size_mb = os.path.getsize(video_file) / (1024 * 1024)
+        size_mb = os.path.getsize(video_file)/(1024*1024)
 
         await msg.edit_text(
             f"📤 Отправка видео...\n\n"
             f"📦 {size_mb:.1f} MB"
         )
 
-        with open(video_file, "rb") as v:
+        with open(video_file,"rb") as v:
 
             await update.message.reply_video(
                 video=v,
@@ -145,10 +142,7 @@ def main():
     )
 
     app.add_handler(
-        CommandHandler(
-            "start",
-            start,
-        )
+        CommandHandler("start", start)
     )
 
     app.add_handler(
