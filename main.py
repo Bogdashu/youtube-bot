@@ -2,6 +2,7 @@ import os
 import re
 import tempfile
 import subprocess
+
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -13,11 +14,7 @@ from telegram.ext import (
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-# ВАЖНО
-LOCAL_BOT_API_URL = os.getenv(
-    "LOCAL_BOT_API_URL",
-    "http://telegram-bot-api:8081"
-)
+LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")
 
 progress_regex = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
 
@@ -29,18 +26,16 @@ def parse_progress(line: str):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🎬 Отправь ссылку YouTube\n"
-        "✅ 1080p\n"
-        "✅ До 2GB\n"
-        "✅ Без лимита 50MB"
+        "🎬 Отправь YouTube ссылку"
     )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     url = update.message.text.strip()
 
     if "youtube.com" not in url and "youtu.be" not in url:
-        await update.message.reply_text("❌ Отправь YouTube ссылку")
+        await update.message.reply_text("❌ Это не YouTube ссылка")
         return
 
     msg = await update.message.reply_text("⏳ Скачивание...")
@@ -52,7 +47,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cmd = [
             "yt-dlp",
             "-f",
-            "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+            "bestvideo[height<=1080]+bestaudio/best",
             "--merge-output-format",
             "mp4",
             "--newline",
@@ -68,16 +63,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            bufsize=1,
         )
 
         for line in process.stdout:
+
             percent = parse_progress(line)
 
             if percent is not None:
                 try:
                     await msg.edit_text(
-                        f"⏳ Скачивание: {percent:.1f}%"
+                        f"⏳ {percent:.1f}%"
                     )
                 except:
                     pass
@@ -98,20 +93,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         size_mb = os.path.getsize(video_file) / (1024 * 1024)
 
         await msg.edit_text(
-            f"📤 Отправка файла ({size_mb:.1f} MB)"
+            f"📤 Отправка {size_mb:.1f} MB"
         )
 
         with open(video_file, "rb") as v:
 
-            # ВАЖНО:
-            # reply_document = до 2GB через local bot api
             await update.message.reply_document(
                 document=v,
                 filename=os.path.basename(video_file),
-                caption=(
-                    f"✅ Готово\n"
-                    f"📦 Размер: {size_mb:.1f} MB"
-                ),
+                caption="✅ Готово",
                 read_timeout=1200,
                 write_timeout=1200,
             )
@@ -121,11 +111,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
 
-    if not TOKEN:
-        print("❌ BOT_TOKEN отсутствует")
-        return
-
-    # ВОТ ГЛАВНОЕ ИСПРАВЛЕНИЕ
     app = (
         Application.builder()
         .token(TOKEN)
@@ -142,7 +127,7 @@ def main():
         )
     )
 
-    print("🤖 Бот запущен")
+    print("BOT STARTED")
 
     app.run_polling()
 
