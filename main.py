@@ -4,118 +4,112 @@ import tempfile
 import subprocess
 import shutil
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-TOKEN = os.getenv("BOT_TOKEN", "PASTE_YOUR_BOT_TOKEN_HERE")
+TOKEN = os.getenv("BOT_TOKEN")
 
-progress_regex = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
-
-def parse_progress(line):
-    match = progress_regex.search(line)
-    if match:
-        return float(match.group(1))
-    return None
+def split_file(file_path, part_size_mb=45):
+    """Разбивает файл на части по 45 MB"""
+    parts_dir = tempfile.mkdtemp(prefix="parts_")
+    part_size = part_size_mb * 1024 * 1024
+    part_num = 1
+    part_paths = []
+    
+    with open(file_path, 'rb') as f:
+        while True:
+            chunk = f.read(part_size)
+            if not chunk:
+                break
+            part_path = os.path.join(parts_dir, f"part_{part_num:03d}.mp4")
+            with open(part_path, 'wb') as pf:
+                pf.write(chunk)
+            part_paths.append(part_path)
+            part_num += 1
+    
+    return parts_dir, part_paths
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🎬 Отправь YouTube ссылку — я скачаю видео"
+        "🎬 Отправь YouTube ссылку\n"
+        "📦 Большие видео разбиваются на части по 45 MB\n"
+        "🔧 Части склеиваются любой программой"
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
-
+    
     if "youtube" not in url and "youtu.be" not in url:
-        await update.message.reply_text("❌ Это не YouTube ссылка")
+        await update.message.reply_text("❌ Не YouTube ссылка")
         return
-
-    msg = await update.message.reply_text("⏳ Скачиваю видео...")
-
+    
+    msg = await update.message.reply_text("⏳ Скачиваю...")
     tmpdir = tempfile.mkdtemp(prefix="yt_")
     outtmpl = os.path.join(tmpdir, "video.%(ext)s")
-
-    format_string = "best[height<=720][ext=mp4]/best[ext=mp4]/best"
-
+    
     cmd = [
-        "python",
-        "-m",
-        "yt_dlp",
-        "-f",
-        format_string,
-        "-N",
-        "8",
-        "--newline",
-        "-o",
-        outtmpl,
-        url
+        "python", "-m", "yt_dlp",
+        "-f", "best[height<=720][ext=mp4]/best",
+        "-N", "8", "--newline", "-o", outtmpl, url
     ]
-
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1
-    )
-
-    downloaded_file = None
-
+    
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    
     try:
         for line in process.stdout:
-            percent = parse_progress(line)
-            if percent is not None:
+            if m := re.search(r"(\d{1,3}(?:\.\d+)?)%", line):
                 try:
-                    await msg.edit_text(f"⏳ Скачиваю видео...\n{percent:.1f}%")
+                    await msg.edit_text(f"⏳ {float(m.group(1)):.1f}%")
                 except:
                     pass
-
+        
         process.wait()
-
-        # Ищем видео
+        
+        video_file = None
         for f in os.listdir(tmpdir):
             path = os.path.join(tmpdir, f)
-            if os.path.isfile(path) and (f.endswith(".mp4") or f.endswith(".mkv") or f.endswith(".webm")):
-                downloaded_file = path
+            if os.path.isfile(path) and f.endswith(('.mp4', '.mkv')):
+                video_file = path
                 break
-
-        if not downloaded_file:
-            await msg.edit_text("❌ Ошибка: файл не найден")
+        
+        if not video_file:
+            await msg.edit_text("❌ Файл не найден")
             return
-
-        await msg.edit_text("📤 Отправляю видео... (720p)")
-
-        with open(downloaded_file, "rb") as video:
-            await update.message.reply_video(
-                video=video,
-                caption="✅ Готово!",
-                supports_streaming=True,
-                read_timeout=600,
-                write_timeout=600,
+        
+        size_mb = os.path.getsize(video_file) / (1024 * 1024)
+        
+        if size_mb > 45:
+            await msg.edit_text(f"📦 Видео {size_mb:.1f} MB, разбиваю на части...")
+            parts_dir, parts = split_file(video_file, 45)
+            
+            await update.message.reply_text(
+                f"📥 **Видео разбито на {len(parts)} частей**\n\n"
+                f"**Как собрать (Windows):**\n`copy /b part_*.mp4 video.mp4`\n\n"
+                f"**Как собрать (Linux/Mac):**\n`cat part_*.mp4 > video.mp4`",
+                parse_mode="Markdown"
             )
-
-        await msg.delete()
-
+            
+            for i, part in enumerate(parts, 1):
+                with open(part, "rb") as p:
+                    await update.message.reply_document(p, filename=f"part_{i:03d}_{len(parts)}.mp4")
+            
+            shutil.rmtree(parts_dir, ignore_errors=True)
+            await msg.delete()
+        else:
+            await msg.edit_text(f"📤 Отправляю ({size_mb:.1f} MB)...")
+            with open(video_file, "rb") as v:
+                await update.message.reply_video(v, caption=f"✅ {size_mb:.1f} MB")
+            await msg.delete()
+            
     except Exception as e:
-        await msg.edit_text(f"❌ Ошибка: {e}")
-
+        await msg.edit_text(f"❌ {str(e)[:100]}")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 def main():
-    if not TOKEN or TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
-        print("❌ Вставь токен!")
-        return
-
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    print("🤖 Bot started...")
+    print("🤖 Бот запущен (без локального API, с разбивкой на части)")
     app.run_polling()
 
 if __name__ == "__main__":
