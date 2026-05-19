@@ -2,7 +2,8 @@ import os
 import re
 import tempfile
 import subprocess
-from telegram import Update, Bot
+
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -16,37 +17,45 @@ LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")
 
 progress_regex = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
 
-processing = set()
-
 
 def parse_progress(line):
+
     match = progress_regex.search(line)
+
     return float(match.group(1)) if match else None
 
 
 def get_real_resolution(filepath):
+
     try:
+
         cmd = [
             "ffprobe",
-            "-v","error",
-            "-select_streams","v:0",
-            "-show_entries","stream=height",
-            "-of","csv=p=0",
-            filepath
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=height",
+            "-of",
+            "csv=p=0",
+            filepath,
         ]
 
         result = subprocess.check_output(
             cmd,
-            text=True
+            text=True,
         ).strip()
 
         return f"{result}p" if result else "unknown"
 
     except:
+
         return "unknown"
 
 
 async def start(update: Update, context):
+
     await update.message.reply_text(
         "🎬 Отправь YouTube ссылку"
     )
@@ -54,224 +63,197 @@ async def start(update: Update, context):
 
 async def handle_message(update: Update, context):
 
-    chat_id = update.effective_chat.id
+    url = update.message.text.strip()
 
-    if chat_id in processing:
+    if "youtube.com" not in url and "youtu.be" not in url:
+
         await update.message.reply_text(
-            "⏳ Уже скачиваю предыдущее видео"
+            "❌ Это не YouTube ссылка"
         )
+
         return
 
-    processing.add(chat_id)
+    msg = await update.message.reply_text(
+        "📥 Скачивание видео...\n\n"
+        "🎞 Определение качества...\n"
+        "⏳ 0%"
+    )
 
-    try:
+    with tempfile.TemporaryDirectory() as tmpdir:
 
-        url = update.message.text.strip()
-
-        if "youtube.com" not in url and "youtu.be" not in url:
-            await update.message.reply_text(
-                "❌ Это не YouTube ссылка"
-            )
-            return
-
-        msg = await update.message.reply_text(
-            "📥 Скачивание видео...\n\n"
-            "🎞 Подготовка...\n"
-            "⏳ 0%"
+        outtmpl = os.path.join(
+            tmpdir,
+            "video.%(ext)s"
         )
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        cmd = [
+            "yt-dlp",
+            "--no-playlist",
+            "-N", "4",
+            "-f",
+            "bestvideo[height<=1080]+bestaudio/best",
+            "--merge-output-format",
+            "mp4",
+            "--newline",
+            "-o",
+            outtmpl,
+            url,
+        ]
 
-            outtmpl = os.path.join(
-                tmpdir,
-                "video.%(ext)s"
-            )
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
 
-            cmd = [
-                "yt-dlp",
+        last_percent = -5
+        last_lines = []
 
-                "--no-playlist",
+        for line in process.stdout:
 
-                "--extractor-args",
-                "youtube:player_client=tv_embedded,tv",
+            last_lines.append(line)
 
-                "-f",
-                "(bestvideo[height<=1080]+bestaudio)/(bestvideo[height<=720]+bestaudio)/best",
+            if len(last_lines) > 10:
+                last_lines.pop(0)
 
-                "--merge-output-format",
-                "mp4",
+            percent = parse_progress(line)
 
-                "--newline",
+            if percent is not None:
 
-                "-N","4",
+                if percent - last_percent >= 5:
 
-                "--retries","10",
-                "--fragment-retries","10",
+                    last_percent = percent
 
-                "-o",
-                outtmpl,
+                    try:
 
-                url,
-            ]
+                        await msg.edit_text(
+                            f"📥 Скачивание видео...\n\n"
+                            f"🎞 Определение качества...\n"
+                            f"⏳ {percent:.1f}%"
+                        )
 
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
+                    except:
+                        pass
 
-            last_percent = -5
-            last_lines = []
+        process.wait()
 
-            for line in process.stdout:
+        if process.returncode != 0:
 
-                last_lines.append(line)
-
-                if len(last_lines) > 15:
-                    last_lines.pop(0)
-
-                percent = parse_progress(line)
-
-                if percent is not None:
-
-                    if percent - last_percent >= 5:
-
-                        last_percent = percent
-
-                        try:
-
-                            await msg.edit_text(
-                                f"📥 Скачивание видео...\n\n"
-                                f"🎞 Подготовка...\n"
-                                f"⏳ {percent:.1f}%"
-                            )
-
-                        except:
-                            pass
-
-            process.wait()
-
-            if process.returncode != 0:
-
-                err = "".join(
-                    last_lines[-5:]
-                )[:1000]
-
-                await msg.edit_text(
-                    f"❌ Ошибка yt-dlp\n\n{err}"
-                )
-
-                return
-
-            video_file = None
-
-            for f in os.listdir(tmpdir):
-
-                if f.endswith(
-                    (
-                        ".mp4",
-                        ".mkv",
-                        ".webm"
-                    )
-                ):
-
-                    video_file = os.path.join(
-                        tmpdir,
-                        f,
-                    )
-
-                    break
-
-            if not video_file:
-
-                await msg.edit_text(
-                    "❌ Видео не найдено"
-                )
-
-                return
-
-            real_quality = get_real_resolution(
-                video_file
-            )
-
-            size_mb = (
-                os.path.getsize(video_file)
-                /1024
-                /1024
-            )
+            error_text = "".join(
+                last_lines[-3:]
+            )[:500]
 
             await msg.edit_text(
-                f"📤 Отправка видео...\n\n"
-                f"🎞 {real_quality}\n"
-                f"📦 {size_mb:.1f} MB"
+                f"❌ Ошибка yt-dlp\n\n"
+                f"{error_text}"
             )
 
-            caption = (
-                f"✅ Готово\n"
-                f"🎞 {real_quality}\n"
-                f"📦 {size_mb:.1f} MB"
+            return
+
+        video_file = None
+
+        for f in os.listdir(tmpdir):
+
+            if f.endswith(
+                (
+                    ".mp4",
+                    ".mkv",
+                    ".webm",
+                )
+            ):
+
+                video_file = os.path.join(
+                    tmpdir,
+                    f,
+                )
+
+                break
+
+        if not video_file:
+
+            await msg.edit_text(
+                "❌ Видео не найдено"
             )
+
+            return
+
+        real_quality = get_real_resolution(
+            video_file
+        )
+
+        size_mb = (
+            os.path.getsize(video_file)
+            / 1024
+            / 1024
+        )
+
+        await msg.edit_text(
+            f"📤 Отправка видео...\n\n"
+            f"🎞 {real_quality}\n"
+            f"📦 {size_mb:.1f} MB"
+        )
+
+        with open(video_file, "rb") as v:
 
             if size_mb <= 49:
 
-                with open(video_file,"rb") as v:
-
-                    await update.message.reply_video(
-                        video=v,
-                        caption=caption,
-                        supports_streaming=True,
-                        read_timeout=1200,
-                        write_timeout=1200,
-                    )
+                await update.message.reply_video(
+                    video=v,
+                    caption=(
+                        f"✅ Готово\n"
+                        f"🎞 {real_quality}\n"
+                        f"📦 {size_mb:.1f} MB"
+                    ),
+                    supports_streaming=True,
+                    read_timeout=1200,
+                    write_timeout=1200,
+                )
 
             else:
 
-                local_bot = Bot(
-                    token=TOKEN,
-                    base_url=f"{LOCAL_BOT_API_URL}/bot",
-                    base_file_url=f"{LOCAL_BOT_API_URL}/file/bot",
-                    local_mode=True,
+                await LOCAL_APP.bot.send_video(
+                    chat_id=update.effective_chat.id,
+                    video=v,
+                    caption=(
+                        f"✅ Готово\n"
+                        f"🎞 {real_quality}\n"
+                        f"📦 {size_mb:.1f} MB"
+                    ),
+                    supports_streaming=True,
+                    read_timeout=1200,
+                    write_timeout=1200,
                 )
 
-                with open(video_file,"rb") as v:
+        await msg.delete()
 
-                    await local_bot.send_video(
-                        chat_id=chat_id,
-                        video=v,
-                        caption=caption,
-                        supports_streaming=True,
-                        read_timeout=1200,
-                        write_timeout=1200,
-                    )
 
-            try:
-                await msg.delete()
-            except:
-                pass
+NORMAL_APP = (
+    Application.builder()
+    .token(TOKEN)
+    .build()
+)
 
-    finally:
-
-        processing.discard(chat_id)
+LOCAL_APP = (
+    Application.builder()
+    .token(TOKEN)
+    .base_url(f"{LOCAL_BOT_API_URL}/bot")
+    .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
+    .local_mode(True)
+    .build()
+)
 
 
 def main():
 
-    app = (
-        Application.builder()
-        .token(TOKEN)
-        .build()
-    )
-
-    app.add_handler(
+    NORMAL_APP.add_handler(
         CommandHandler(
             "start",
             start,
         )
     )
 
-    app.add_handler(
+    NORMAL_APP.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
             handle_message,
@@ -280,9 +262,7 @@ def main():
 
     print("BOT STARTED")
 
-    app.run_polling(
-        drop_pending_updates=True
-    )
+    NORMAL_APP.run_polling()
 
 
 if __name__ == "__main__":
