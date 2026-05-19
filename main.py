@@ -8,7 +8,6 @@ from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    ContextTypes,
     filters,
 )
 
@@ -19,26 +18,18 @@ progress_regex = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
 
 
 def parse_progress(line):
-
-    match = progress_regex.search(line)
-
-    return float(match.group(1)) if match else None
+    m = progress_regex.search(line)
+    return float(m.group(1)) if m else None
 
 
 def get_real_resolution(filepath):
-
     try:
-
         cmd = [
             "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=height",
-            "-of",
-            "csv=p=0",
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=height",
+            "-of", "csv=p=0",
             filepath,
         ]
 
@@ -50,8 +41,43 @@ def get_real_resolution(filepath):
         return f"{result}p" if result else "unknown"
 
     except:
-
         return "unknown"
+
+
+def estimate_size_mb(url, height):
+
+    try:
+
+        cmd = [
+            "yt-dlp",
+            "--js-runtimes", "node",
+            "--no-playlist",
+
+            "--extractor-args",
+            "youtube:player_client=android_vr,web",
+
+            "-f",
+            f"(bv*[height<={height}]+ba/b)",
+
+            "--print",
+            "%(filesize_approx)s",
+
+            url,
+        ]
+
+        out = subprocess.check_output(
+            cmd,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+
+        if not out or out == "NA":
+            return None
+
+        return int(out) / 1024 / 1024
+
+    except:
+        return None
 
 
 async def start(update: Update, context):
@@ -70,13 +96,24 @@ async def handle_message(update: Update, context):
         await update.message.reply_text(
             "❌ Это не YouTube ссылка"
         )
-
         return
 
     msg = await update.message.reply_text(
-        "📥 Скачивание видео...\n\n"
-        "🎞 Определение качества...\n"
-        "⏳ 0%"
+        "📥 Подготовка...\n\n"
+        "🎞 Проверка качества..."
+    )
+
+    target_height = 1080
+
+    est = estimate_size_mb(url, 1080)
+
+    if est and est > 100:
+        target_height = 720
+
+    await msg.edit_text(
+        f"📥 Скачивание видео...\n\n"
+        f"🎞 Цель: {target_height}p\n"
+        f"⏳ 0%"
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -88,15 +125,29 @@ async def handle_message(update: Update, context):
 
         cmd = [
             "yt-dlp",
+
+            "--js-runtimes", "node",
+
             "--no-playlist",
+
+            "--extractor-args",
+            "youtube:player_client=android_vr,web",
+
             "-N", "4",
+
             "-f",
-            "bestvideo[height<=1080]+bestaudio/best",
+            f"(bv*[height<={target_height}]+ba/b)"
+            f"/(bv*[height<=720]+ba/b)"
+            f"/best",
+
             "--merge-output-format",
             "mp4",
+
             "--newline",
+
             "-o",
             outtmpl,
+
             url,
         ]
 
@@ -114,7 +165,7 @@ async def handle_message(update: Update, context):
 
             last_lines.append(line)
 
-            if len(last_lines) > 10:
+            if len(last_lines) > 15:
                 last_lines.pop(0)
 
             percent = parse_progress(line)
@@ -129,7 +180,7 @@ async def handle_message(update: Update, context):
 
                         await msg.edit_text(
                             f"📥 Скачивание видео...\n\n"
-                            f"🎞 Определение качества...\n"
+                            f"🎞 Цель: {target_height}p\n"
                             f"⏳ {percent:.1f}%"
                         )
 
@@ -140,13 +191,10 @@ async def handle_message(update: Update, context):
 
         if process.returncode != 0:
 
-            error_text = "".join(
-                last_lines[-3:]
-            )[:500]
+            err = "".join(last_lines[-5:])[:900]
 
             await msg.edit_text(
-                f"❌ Ошибка yt-dlp\n\n"
-                f"{error_text}"
+                f"❌ Ошибка yt-dlp\n\n{err}"
             )
 
             return
@@ -162,12 +210,10 @@ async def handle_message(update: Update, context):
                     ".webm",
                 )
             ):
-
                 video_file = os.path.join(
                     tmpdir,
                     f,
                 )
-
                 break
 
         if not video_file:
@@ -175,7 +221,6 @@ async def handle_message(update: Update, context):
             await msg.edit_text(
                 "❌ Видео не найдено"
             )
-
             return
 
         real_quality = get_real_resolution(
@@ -194,17 +239,19 @@ async def handle_message(update: Update, context):
             f"📦 {size_mb:.1f} MB"
         )
 
+        caption = (
+            f"✅ Готово\n"
+            f"🎞 {real_quality}\n"
+            f"📦 {size_mb:.1f} MB"
+        )
+
         with open(video_file, "rb") as v:
 
             if size_mb <= 49:
 
                 await update.message.reply_video(
                     video=v,
-                    caption=(
-                        f"✅ Готово\n"
-                        f"🎞 {real_quality}\n"
-                        f"📦 {size_mb:.1f} MB"
-                    ),
+                    caption=caption,
                     supports_streaming=True,
                     read_timeout=1200,
                     write_timeout=1200,
@@ -215,17 +262,16 @@ async def handle_message(update: Update, context):
                 await LOCAL_APP.bot.send_video(
                     chat_id=update.effective_chat.id,
                     video=v,
-                    caption=(
-                        f"✅ Готово\n"
-                        f"🎞 {real_quality}\n"
-                        f"📦 {size_mb:.1f} MB"
-                    ),
+                    caption=caption,
                     supports_streaming=True,
                     read_timeout=1200,
                     write_timeout=1200,
                 )
 
-        await msg.delete()
+        try:
+            await msg.delete()
+        except:
+            pass
 
 
 NORMAL_APP = (
@@ -262,7 +308,9 @@ def main():
 
     print("BOT STARTED")
 
-    NORMAL_APP.run_polling()
+    NORMAL_APP.run_polling(
+        drop_pending_updates=True
+    )
 
 
 if __name__ == "__main__":
