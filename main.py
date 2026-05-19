@@ -1,6 +1,5 @@
 import os
 import re
-import json
 import tempfile
 import subprocess
 
@@ -26,6 +25,35 @@ def parse_progress(line):
     return float(match.group(1)) if match else None
 
 
+def get_real_resolution(filepath):
+
+    try:
+
+        cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=height",
+            "-of",
+            "csv=p=0",
+            filepath,
+        ]
+
+        result = subprocess.check_output(
+            cmd,
+            text=True,
+        ).strip()
+
+        return f"{result}p" if result else "unknown"
+
+    except:
+
+        return "unknown"
+
+
 async def start(update: Update, context):
 
     await update.message.reply_text(
@@ -46,7 +74,9 @@ async def handle_message(update: Update, context):
         return
 
     msg = await update.message.reply_text(
-        "📥 Подготовка..."
+        "📥 Скачивание видео...\n\n"
+        "🎞 Определение качества...\n"
+        "⏳ 0%"
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -56,45 +86,15 @@ async def handle_message(update: Update, context):
             "video.%(ext)s"
         )
 
-        info_cmd = [
-            "yt-dlp",
-            "--dump-json",
-            url,
-        ]
-
-        try:
-
-            info_raw = subprocess.check_output(
-                info_cmd,
-                text=True,
-            )
-
-            info = json.loads(info_raw)
-
-            real_height = info.get(
-                "height",
-                "?"
-            )
-
-        except:
-
-            real_height = "?"
-
-        await msg.edit_text(
-            f"📥 Скачивание видео...\n\n"
-            f"🎞 Качество: {real_height}p\n"
-            f"⏳ 0%"
-        )
-
         cmd = [
             "yt-dlp",
+            "--no-playlist",
+            "-N", "4",
             "-f",
             "bestvideo[height<=1080]+bestaudio/best",
             "--merge-output-format",
             "mp4",
             "--newline",
-            "--extractor-args",
-            "youtube:player_client=android",
             "-o",
             outtmpl,
             url,
@@ -108,8 +108,14 @@ async def handle_message(update: Update, context):
         )
 
         last_percent = -5
+        last_lines = []
 
         for line in process.stdout:
+
+            last_lines.append(line)
+
+            if len(last_lines) > 10:
+                last_lines.pop(0)
 
             percent = parse_progress(line)
 
@@ -123,7 +129,7 @@ async def handle_message(update: Update, context):
 
                         await msg.edit_text(
                             f"📥 Скачивание видео...\n\n"
-                            f"🎞 Качество: {real_height}p\n"
+                            f"🎞 Определение качества...\n"
                             f"⏳ {percent:.1f}%"
                         )
 
@@ -134,8 +140,13 @@ async def handle_message(update: Update, context):
 
         if process.returncode != 0:
 
+            error_text = "".join(
+                last_lines[-3:]
+            )[:500]
+
             await msg.edit_text(
-                "❌ Ошибка yt-dlp"
+                f"❌ Ошибка yt-dlp\n\n"
+                f"{error_text}"
             )
 
             return
@@ -167,23 +178,20 @@ async def handle_message(update: Update, context):
 
             return
 
+        real_quality = get_real_resolution(
+            video_file
+        )
+
         size_mb = (
             os.path.getsize(video_file)
             / 1024
             / 1024
         )
 
-        method = (
-            "Cloud API"
-            if size_mb <= 49
-            else "Local API"
-        )
-
         await msg.edit_text(
             f"📤 Отправка видео...\n\n"
-            f"🎞 {real_height}p\n"
-            f"📦 {size_mb:.1f} MB\n"
-            f"🚀 {method}"
+            f"🎞 {real_quality}\n"
+            f"📦 {size_mb:.1f} MB"
         )
 
         with open(video_file, "rb") as v:
@@ -194,7 +202,7 @@ async def handle_message(update: Update, context):
                     video=v,
                     caption=(
                         f"✅ Готово\n"
-                        f"🎞 {real_height}p\n"
+                        f"🎞 {real_quality}\n"
                         f"📦 {size_mb:.1f} MB"
                     ),
                     supports_streaming=True,
@@ -209,7 +217,7 @@ async def handle_message(update: Update, context):
                     video=v,
                     caption=(
                         f"✅ Готово\n"
-                        f"🎞 {real_height}p\n"
+                        f"🎞 {real_quality}\n"
                         f"📦 {size_mb:.1f} MB"
                     ),
                     supports_streaming=True,
@@ -229,12 +237,8 @@ NORMAL_APP = (
 LOCAL_APP = (
     Application.builder()
     .token(TOKEN)
-    .base_url(
-        f"{LOCAL_BOT_API_URL}/bot"
-    )
-    .base_file_url(
-        f"{LOCAL_BOT_API_URL}/file/bot"
-    )
+    .base_url(f"{LOCAL_BOT_API_URL}/bot")
+    .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
     .local_mode(True)
     .build()
 )
