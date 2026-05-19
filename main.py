@@ -8,7 +8,6 @@ from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    ContextTypes,
     filters,
 )
 
@@ -19,26 +18,18 @@ progress_regex = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
 
 
 def parse_progress(line):
-
-    match = progress_regex.search(line)
-
-    return float(match.group(1)) if match else None
+    m = progress_regex.search(line)
+    return float(m.group(1)) if m else None
 
 
 def get_real_resolution(filepath):
-
     try:
-
         cmd = [
             "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=height",
-            "-of",
-            "csv=p=0",
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=height",
+            "-of", "csv=p=0",
             filepath,
         ]
 
@@ -53,41 +44,40 @@ def get_real_resolution(filepath):
         return "unknown"
 
 
-def download_video(url, outtmpl, quality):
+def estimate_size_mb(url, height):
 
-    cmd = [
-        "yt-dlp",
-        "--no-playlist",
-        "-N", "4",
-        "--newline",
-        "--merge-output-format",
-        "mp4",
-        "-o",
-        outtmpl,
-    ]
+    try:
 
-    if quality == "1080":
+        cmd = [
+            "yt-dlp",
+            "--js-runtimes", "node",
+            "--no-playlist",
 
-        cmd += [
+            "--extractor-args",
+            "youtube:player_client=android_vr,web",
+
             "-f",
-            "bestvideo[height<=1080]+bestaudio/best"
+            f"(bv*[height<={height}]+ba/b)",
+
+            "--print",
+            "%(filesize_approx)s",
+
+            url,
         ]
 
-    else:
+        out = subprocess.check_output(
+            cmd,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
 
-        cmd += [
-            "-f",
-            "bestvideo[height<=720]+bestaudio/best"
-        ]
+        if not out or out == "NA":
+            return None
 
-    cmd.append(url)
+        return int(out) / 1024 / 1024
 
-    return subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+    except:
+        return None
 
 
 async def start(update: Update, context):
@@ -106,13 +96,24 @@ async def handle_message(update: Update, context):
         await update.message.reply_text(
             "❌ Это не YouTube ссылка"
         )
-
         return
 
     msg = await update.message.reply_text(
-        "📥 Скачивание видео...\n\n"
-        "🎞 1080p\n"
-        "⏳ 0%"
+        "📥 Подготовка...\n\n"
+        "🎞 Проверка качества..."
+    )
+
+    target_height = 1080
+
+    est = estimate_size_mb(url, 1080)
+
+    if est and est > 100:
+        target_height = 720
+
+    await msg.edit_text(
+        f"📥 Скачивание видео...\n\n"
+        f"🎞 Цель: {target_height}p\n"
+        f"⏳ 0%"
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -122,10 +123,39 @@ async def handle_message(update: Update, context):
             "video.%(ext)s"
         )
 
-        process = download_video(
-            url,
+        cmd = [
+            "yt-dlp",
+
+            "--js-runtimes", "node",
+
+            "--no-playlist",
+
+            "--extractor-args",
+            "youtube:player_client=android_vr,web",
+
+            "-N", "4",
+
+            "-f",
+            f"(bv*[height<={target_height}]+ba/b)"
+            f"/(bv*[height<=720]+ba/b)"
+            f"/best",
+
+            "--merge-output-format",
+            "mp4",
+
+            "--newline",
+
+            "-o",
             outtmpl,
-            "1080"
+
+            url,
+        ]
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
         )
 
         last_percent = -5
@@ -135,7 +165,7 @@ async def handle_message(update: Update, context):
 
             last_lines.append(line)
 
-            if len(last_lines) > 10:
+            if len(last_lines) > 15:
                 last_lines.pop(0)
 
             percent = parse_progress(line)
@@ -150,7 +180,7 @@ async def handle_message(update: Update, context):
 
                         await msg.edit_text(
                             f"📥 Скачивание видео...\n\n"
-                            f"🎞 1080p\n"
+                            f"🎞 Цель: {target_height}p\n"
                             f"⏳ {percent:.1f}%"
                         )
 
@@ -161,13 +191,10 @@ async def handle_message(update: Update, context):
 
         if process.returncode != 0:
 
-            error_text = "".join(
-                last_lines[-5:]
-            )[:900]
+            err = "".join(last_lines[-5:])[:900]
 
             await msg.edit_text(
-                f"❌ Ошибка yt-dlp\n\n"
-                f"{error_text}"
+                f"❌ Ошибка yt-dlp\n\n{err}"
             )
 
             return
@@ -176,13 +203,17 @@ async def handle_message(update: Update, context):
 
         for f in os.listdir(tmpdir):
 
-            if f.endswith((".mp4", ".mkv", ".webm")):
-
+            if f.endswith(
+                (
+                    ".mp4",
+                    ".mkv",
+                    ".webm",
+                )
+            ):
                 video_file = os.path.join(
                     tmpdir,
-                    f
+                    f,
                 )
-
                 break
 
         if not video_file:
@@ -190,54 +221,7 @@ async def handle_message(update: Update, context):
             await msg.edit_text(
                 "❌ Видео не найдено"
             )
-
             return
-
-        size_mb = (
-            os.path.getsize(video_file)
-            / 1024
-            / 1024
-        )
-
-        if size_mb > 100:
-
-            await msg.edit_text(
-                "📥 Файл слишком большой.\n"
-                "Перекодировка в 720p..."
-            )
-
-            os.remove(video_file)
-
-            process = download_video(
-                url,
-                outtmpl,
-                "720"
-            )
-
-            process.wait()
-
-            video_file = None
-
-            for f in os.listdir(tmpdir):
-
-                if f.endswith(
-                    (".mp4", ".mkv", ".webm")
-                ):
-
-                    video_file = os.path.join(
-                        tmpdir,
-                        f
-                    )
-
-                    break
-
-            if not video_file:
-
-                await msg.edit_text(
-                    "❌ Ошибка 720p"
-                )
-
-                return
 
         real_quality = get_real_resolution(
             video_file
@@ -255,13 +239,13 @@ async def handle_message(update: Update, context):
             f"📦 {size_mb:.1f} MB"
         )
 
-        with open(video_file, "rb") as v:
+        caption = (
+            f"✅ Готово\n"
+            f"🎞 {real_quality}\n"
+            f"📦 {size_mb:.1f} MB"
+        )
 
-            caption = (
-                f"✅ Готово\n"
-                f"🎞 {real_quality}\n"
-                f"📦 {size_mb:.1f} MB"
-            )
+        with open(video_file, "rb") as v:
 
             if size_mb <= 49:
 
@@ -269,8 +253,8 @@ async def handle_message(update: Update, context):
                     video=v,
                     caption=caption,
                     supports_streaming=True,
-                    read_timeout=3600,
-                    write_timeout=3600,
+                    read_timeout=1200,
+                    write_timeout=1200,
                 )
 
             else:
@@ -280,17 +264,19 @@ async def handle_message(update: Update, context):
                     video=v,
                     caption=caption,
                     supports_streaming=True,
-                    read_timeout=3600,
-                    write_timeout=3600,
+                    read_timeout=1200,
+                    write_timeout=1200,
                 )
 
-        await msg.delete()
+        try:
+            await msg.delete()
+        except:
+            pass
 
 
 NORMAL_APP = (
     Application.builder()
     .token(TOKEN)
-    .concurrent_updates(False)
     .build()
 )
 
@@ -298,14 +284,8 @@ LOCAL_APP = (
     Application.builder()
     .token(TOKEN)
     .base_url(f"{LOCAL_BOT_API_URL}/bot")
-    .base_file_url(
-        f"{LOCAL_BOT_API_URL}/file/bot"
-    )
+    .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
     .local_mode(True)
-    .connect_timeout(300)
-    .read_timeout(3600)
-    .write_timeout(3600)
-    .pool_timeout(3600)
     .build()
 )
 
