@@ -102,27 +102,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cookies_path = os.path.join(tmpdir, "cookies.txt")
                 with open(cookies_path, "w", encoding="utf-8") as f:
                     f.write(YT_COOKIES)
-
             cmd = [
                 "yt-dlp",
                 "--no-playlist",
                 "--extractor-args",
-                "youtube:player_client=ios",
-                "--retries",
-                "3",
-                "--fragment-retries",
-                "3",
-                "-N",
-                "4",
+                "youtube:player_client=mweb",
                 "-f",
                 "bv*+ba/b[ext=mp4]/b",
-                "--merge-output-format",
-                "mp4",
+                "--format-sort",
+                "res,ext:mp4:m4a",
+                "-N", "8",
+                "--merge-output-format", "mp4",
                 "--newline",
-                "-o",
-                outtmpl,
+                "-o", outtmpl,
+                url,
             ]
-
             if cookies_path:
                 cmd += ["--cookies", cookies_path]
 
