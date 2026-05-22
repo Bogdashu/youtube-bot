@@ -1,3 +1,5 @@
-python-telegram-bot==21.6
+fastapi
+uvicorn
+requests
+pydantic
 yt-dlp
-httpx
