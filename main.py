@@ -2,16 +2,17 @@ import os, re, json, uuid, asyncio, tempfile, subprocess, logging, httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (Application, CommandHandler, MessageHandler,
                           CallbackQueryHandler, filters)
+from telegram.request import HTTPXRequest
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("ytbot")
 
 TOKEN = os.getenv("BOT_TOKEN")
-LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")
+LOCAL_BOT_API_URL = (os.getenv("LOCAL_BOT_API_URL") or "").strip().rstrip("/")
 RF_WORKER_URL = (os.getenv("RF_WORKER_URL") or "").strip().rstrip("/")
 if RF_WORKER_URL and not RF_WORKER_URL.startswith(("http://", "https://")):
-    RF_WORKER_URL = "http://" + RF_WORKER_URL          # защита от голого IP
+    RF_WORKER_URL = "http://" + RF_WORKER_URL
 WORKER_SECRET = os.getenv("WORKER_SECRET")
 
 LOCAL_LIMIT_MB = 120     # выше — на воркер РФ
@@ -44,6 +45,26 @@ def fmt_for(mode):
         return "bestaudio/best"
     h = 1080 if mode == "1080" else 720
     return f"(bv*[height<={h}]+ba/b)/best"
+
+# ---------- локальный Bot API: большие таймауты + ленивый init ----------
+_local_req = HTTPXRequest(connect_timeout=30, read_timeout=2400,
+                          write_timeout=2400, pool_timeout=30)
+LOCAL_APP = (Application.builder().token(TOKEN)
+             .base_url(f"{LOCAL_BOT_API_URL}/bot")
+             .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
+             .local_mode(True)
+             .request(_local_req)
+             .build())
+_local_ready = False
+
+async def ensure_local():
+    global _local_ready
+    if not _local_ready:
+        await LOCAL_APP.bot.initialize()   # getMe к локальному серверу (с большим таймаутом)
+        _local_ready = True
+        log.info("LOCAL_APP initialized (lazy)")
+
+# -----------------------------------------------------------------------
 
 async def start(update, context):
     await update.message.reply_text("🎬 Отправь YouTube ссылку")
@@ -83,19 +104,23 @@ async def run_progress(cmd, q, prefix):
     await proc.wait()
     return proc.returncode, "".join(tail[-6:])
 
-async def send_file(bot_normal, bot_local, chat_id, path, mode):
+async def send_local_file(chat_id, path, mode):
     size = os.path.getsize(path) / 1024 / 1024
-    bot = bot_normal if size <= TG_DIRECT_MB else bot_local
     cap = f"✅ Готово • {size:.1f} MB"
+    if size <= TG_DIRECT_MB:
+        bot = NORMAL_APP.bot               # маленькие — обычный API
+    else:
+        await ensure_local()               # большие — локальный API
+        bot = LOCAL_APP.bot
     with open(path, "rb") as fh:
         if mode == "audio":
             await bot.send_audio(chat_id=chat_id, audio=fh, caption=cap,
-                                 read_timeout=1800, write_timeout=1800,
+                                 read_timeout=2400, write_timeout=2400,
                                  connect_timeout=60, pool_timeout=60)
         else:
             await bot.send_video(chat_id=chat_id, video=fh, caption=cap,
                                  supports_streaming=True,
-                                 read_timeout=1800, write_timeout=1800,
+                                 read_timeout=2400, write_timeout=2400,
                                  connect_timeout=60, pool_timeout=60)
 
 async def on_railway(q, url, mode):
@@ -112,9 +137,9 @@ async def on_railway(q, url, mode):
             await q.edit_message_text("❌ Файл не найден"); return
         await q.edit_message_text("📤 Отправка…")
         try:
-            await send_file(NORMAL_APP.bot, LOCAL_APP.bot, chat_id, f, mode)
+            await send_local_file(chat_id, f, mode)
         except Exception as e:
-            log.exception("send_file failed")
+            log.exception("send_local_file failed")
             await q.edit_message_text(f"❌ Не удалось отправить:\n{type(e).__name__}: {str(e)[:500]}")
             return
     try: await q.message.delete()
@@ -123,7 +148,7 @@ async def on_railway(q, url, mode):
 async def on_worker(q, url, mode, size_mb):
     chat_id = q.message.chat_id
     headers = {"X-Secret": WORKER_SECRET}
-    # 1) ставим задачу воркеру и ждём готовности
+    # 1) задача воркеру + ожидание
     async with httpx.AsyncClient(timeout=60) as cl:
         r = await cl.post(f"{RF_WORKER_URL}/jobs", json={"url": url, "mode": mode}, headers=headers)
         r.raise_for_status(); job = r.json()["job_id"]
@@ -140,12 +165,13 @@ async def on_worker(q, url, mode, size_mb):
                 try: await q.edit_message_text(f"📥 РФ-воркер качает ({mode})…\n⏳ {p:.0f}%")
                 except Exception: pass
 
-    # 2) заливаем в Telegram через локальный Bot API
+    # 2) заливка через локальный Bot API (по URL воркера)
     file_url = f"{RF_WORKER_URL}/jobs/{job}/file?secret={WORKER_SECRET}"
     cap = f"✅ Готово • ~{size_mb:.0f} MB"
     try: await q.edit_message_text(f"📤 Заливаю в Telegram (~{size_mb:.0f} MB)…")
     except Exception: pass
     try:
+        await ensure_local()
         if mode == "audio":
             await LOCAL_APP.bot.send_audio(chat_id=chat_id, audio=file_url, caption=cap,
                                            read_timeout=2400, write_timeout=2400,
@@ -198,18 +224,15 @@ async def on_error(update, context):
     except Exception:
         pass
 
-# --- ВАЖНО: LOCAL_APP нужно инициализировать, иначе send_* через него падает ---
-LOCAL_APP = (Application.builder().token(TOKEN)
-             .base_url(f"{LOCAL_BOT_API_URL}/bot")
-             .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
-             .local_mode(True).build())
-
 async def _post_init(app):
-    await LOCAL_APP.initialize()      # поднимаем HTTP-клиент локального бота
-    log.info("LOCAL_APP initialized")
+    # прогреваем локальный бот, но НЕ роняем запуск, если он недоступен
+    try:
+        await asyncio.wait_for(ensure_local(), timeout=90)
+    except Exception as e:
+        log.warning(f"LOCAL_APP init отложен (прогрев не удался): {e!r}")
 
 async def _post_shutdown(app):
-    try: await LOCAL_APP.shutdown()
+    try: await LOCAL_APP.bot.shutdown()
     except Exception: pass
 
 NORMAL_APP = (Application.builder().token(TOKEN)
