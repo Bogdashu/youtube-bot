@@ -8,9 +8,7 @@ RF_WORKER_URL = os.getenv("RF_WORKER_URL")
 WORKER_SECRET = os.getenv("WORKER_SECRET")
 LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")
 
-TG_DIRECT_MB = 100      # до этого РЕАЛЬНОГО размера шлём прямо в чат
-RAILWAY_TRY_MB = 250    # если ПРОГНОЗ больше — не качаем на Railway, сразу ссылкой с РФ
-APPROX_FACTOR = 0.5     # filesize_approx у YouTube завышен ~вдвое — корректируем предпросмотр
+TG_DIRECT_MB = 100
 PENDING = {}
 
 COMMON = ["--js-runtimes", "node", "--no-playlist",
@@ -24,9 +22,7 @@ def ydlp_info(url):
 def _sz(f):
     if not f:
         return 0
-    if f.get("filesize"):                                       # точный размер — как есть
-        return f["filesize"]
-    return int((f.get("filesize_approx") or 0) * APPROX_FACTOR)  # приблизительный — половиним
+    return f.get("filesize") or f.get("filesize_approx") or 0
 
 def _best(cands):
     # как сортирует yt-dlp по умолчанию: выше разрешение, потом fps, потом битрейт
@@ -154,7 +150,7 @@ async def on_railway(q, url, mode, title):
         if not f:
             await q.edit_message_text("❌ Файл не найден"); return
         size = os.path.getsize(f) / 1024 / 1024
-        if size > TG_DIRECT_MB:                       # решаем по РЕАЛЬНОМУ размеру
+        if size > TG_DIRECT_MB:
             await q.edit_message_text("📥 Готовлю файл...")
             await on_worker(q, url, mode, title, size); return
         if mode == "audio":
@@ -239,9 +235,7 @@ async def on_choice(update, context):
     url, title, s = data["url"], data["title"], data["sizes"]
     size_mb = mb(s[mode])
     await q.edit_message_text(f"📥 Готовлю ({'аудио' if mode=='audio' else mode+'p'})...")
-    # Только заведомо большое (по прогнозу) сразу уходит ссылкой — чтобы не качать его на Railway.
-    # Остальное качаем на Railway и решаем чат/ссылка по РЕАЛЬНОМУ размеру файла.
-    if mode != "audio" and size_mb > RAILWAY_TRY_MB:
+    if mode != "audio" and size_mb > TG_DIRECT_MB:
         await on_worker(q, url, mode, title, size_mb)
     else:
         await on_railway(q, url, mode, title)
