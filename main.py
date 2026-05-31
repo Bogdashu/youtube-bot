@@ -3,11 +3,12 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (Application, CommandHandler, MessageHandler,
                           CallbackQueryHandler, filters)
 
-TOKEN = os.getenv("BOT_TOKEN")
-RF_WORKER_URL = os.getenv("RF_WORKER_URL")
-WORKER_SECRET = os.getenv("WORKER_SECRET")
+TOKEN             = os.getenv("BOT_TOKEN")
+RF_WORKER_URL     = os.getenv("RF_WORKER_URL")
+WORKER_SECRET     = os.getenv("WORKER_SECRET")
 LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")
 
+# ── cookies ──────────────────────────────────────────────────────────────
 COOKIES_FILE = None
 _cookies_b64 = os.getenv("YT_COOKIES_B64")
 if _cookies_b64:
@@ -15,91 +16,129 @@ if _cookies_b64:
     with open(COOKIES_FILE, "wb") as _cf:
         _cf.write(base64.b64decode(_cookies_b64))
 
-# --- Единственное определение COMMON (базовые флаги yt-dlp) ---
-COMMON = ["--js-runtimes", "node", "--no-playlist",
-          "--socket-timeout", "30", "--retries", "5",
-          "--extractor-args", "youtube:player_client=web_safari,android,web"]
+# ── yt-dlp базовые аргументы (одно определение!) ─────────────────────────
+_BASE = [
+    "--js-runtimes", "node", "--no-playlist",
+    "--socket-timeout", "30", "--retries", "5",
+    "--extractor-args", "youtube:player_client=android_vr,web",
+]
+COMMON_NO_COOKIES = list(_BASE)
+COMMON = list(_BASE)
+if COOKIES_FILE:
+    COMMON += ["--cookies", COOKIES_FILE]
 
 TG_DIRECT_MB = 200
 VIDEO_FACTOR = 0.5
 PENDING = {}
 
+# ── LOCAL Bot API ─────────────────────────────────────────────────────────
+LOCAL_APP = None
+LOCAL_BOT = None   # инициализируется в post_init
 
-def common_attempts():
-    """Сначала пробуем с куки (если заданы), потом без куки."""
+if LOCAL_BOT_API_URL:
+    LOCAL_APP = (
+        Application.builder()
+        .token(TOKEN)
+        .base_url(f"{LOCAL_BOT_API_URL}/bot")
+        .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
+        .local_mode(True)
+        .build()
+    )
+
+async def post_init(application):
+    global LOCAL_BOT
+    if LOCAL_APP is not None:
+        try:
+            await LOCAL_APP.initialize()
+            LOCAL_BOT = LOCAL_APP.bot
+            print("[local API] OK инициализирован")
+        except Exception as e:
+            print(f"[local API] FAIL недоступен: {e}")
+            LOCAL_BOT = None
+
+# ── yt-dlp helpers ───────────────────────────────────────────────────────
+def ydlp_info(url):
+    """Сначала пробуем с куки, потом без."""
     attempts = []
     if COOKIES_FILE:
-        attempts.append(COMMON + ["--cookies", COOKIES_FILE])
-    attempts.append(list(COMMON))
-    return attempts
-
-
-def ydlp_info(url):
+        attempts.append(COMMON)           # с куки
+    attempts.append(COMMON_NO_COOKIES)    # без куки
     last_err = "yt-dlp failed"
-    for opts in common_attempts():
-        p = subprocess.run(["yt-dlp", *opts, "-J", url],
+    for args in attempts:
+        p = subprocess.run(["yt-dlp", *args, "-J", url],
                            capture_output=True, text=True)
         if p.returncode == 0:
             return json.loads(p.stdout)
-        last_err = (p.stderr or p.stdout or "yt-dlp failed").strip()
+        last_err = (p.stderr or p.stdout or last_err).strip()
     raise RuntimeError(last_err[-800:])
 
-
-def _fmt_size(f):
-    """Размер формата для предпросмотра.
-    Точный filesize берём как есть; только filesize_approx уменьшаем."""
+def _sz(f, apply_factor=False):
+    """Возвращает размер формата в байтах.
+    apply_factor=True -- применить VIDEO_FACTOR только к filesize_approx.
+    """
     if not f:
         return 0
-    if f.get("filesize"):
+    if f.get("filesize"):                     # точный размер -- не трогаем
         return f["filesize"]
-    if f.get("filesize_approx"):
-        return int(f["filesize_approx"] * VIDEO_FACTOR)
-    return 0
-
+    approx = f.get("filesize_approx") or 0
+    return int(approx * VIDEO_FACTOR) if apply_factor else approx
 
 def _best(cands):
     if not cands:
         return None
-    return max(cands, key=lambda f: ((f.get("height") or 0),
-                                     (f.get("fps") or 0),
-                                     (f.get("tbr") or 0)))
-
+    return max(cands, key=lambda f: (
+        (f.get("height") or 0),
+        (f.get("fps")    or 0),
+        (f.get("tbr")    or 0)
+    ))
 
 def pick_sizes(info):
     fmts = info.get("formats", [])
-    vids = [f for f in fmts if f.get("vcodec") != "none" and f.get("acodec") == "none"]
-    auds = [f for f in fmts if f.get("acodec") != "none" and f.get("vcodec") == "none"]
+    # Только форматы >= 480p (без 360p/240p)
+    vids = [f for f in fmts
+            if f.get("vcodec") != "none"
+            and f.get("acodec") == "none"
+            and (f.get("height") or 0) >= 480]
+    auds = [f for f in fmts
+            if f.get("acodec") != "none" and f.get("vcodec") == "none"]
 
-    a_m4a = [f for f in auds if f.get("ext") == "m4a"]
-    a_size = _fmt_size(_best(a_m4a) or _best(auds))
+    a_m4a  = [f for f in auds if f.get("ext") == "m4a"]
+    a_size = _sz(_best(a_m4a) or _best(auds))
 
     def vid_total(maxh):
         pool = [f for f in vids if (f.get("height") or 0) <= maxh]
         if pool:
-            mp4 = [f for f in pool if f.get("ext") == "mp4"]
-            return _fmt_size(_best(mp4) or _best(pool)) + a_size
-        comb = [f for f in fmts if f.get("vcodec") != "none" and f.get("acodec") != "none"
-                and (f.get("height") or 0) <= maxh]
+            mp4  = [f for f in pool if f.get("ext") == "mp4"]
+            best = _best(mp4) or _best(pool)
+            return _sz(best, apply_factor=True) + a_size
+        # комбинированные форматы (video+audio в одном)
+        comb = [f for f in fmts
+                if f.get("vcodec") != "none" and f.get("acodec") != "none"
+                and (f.get("height") or 0) <= maxh
+                and (f.get("height") or 0) >= 480]
         cmp4 = [f for f in comb if f.get("ext") == "mp4"]
-        return _fmt_size(_best(cmp4) or _best(comb))
+        best = _best(cmp4) or _best(comb)
+        return _sz(best, apply_factor=True)
 
-    return {"1080": vid_total(1080),
-            "720": vid_total(720),
-            "audio": a_size}
-
+    return {
+        "1080": vid_total(1080),
+        "720":  vid_total(720),
+        "audio": a_size,
+    }
 
 mb = lambda b: b / 1024 / 1024
-
 
 def fmt_for(mode):
     if mode == "audio":
         return "bestaudio[ext=m4a]/bestaudio/best"
     h = 1080 if mode == "1080" else 720
-    # Раздельные потоки (DASH) = высокое качество; прогрессив (360p) — только крайний случай
-    return (f"bv*[height<={h}]+ba/"
-            f"bv*[height<={h}]/"
-            f"b[height<={h}]")
-
+    # Строго: только >= 480p; без fallback на 360/240
+    return (
+        f"bv*[height<={h}][height>=480][ext=mp4]+ba[ext=m4a]/"
+        f"bv*[height<={h}][height>=480]+ba/"
+        f"bv*[height<={h}][height>=480][ext=mp4]/"
+        f"bv*[height<={h}][height>=480]"
+    )
 
 def get_real_resolution(filepath):
     try:
@@ -110,194 +149,184 @@ def get_real_resolution(filepath):
     except Exception:
         return "unknown"
 
-
-# --- Локальный Bot API: строим объект, инициализируем один раз при старте ---
-LOCAL_APP = None
-if LOCAL_BOT_API_URL:
-    LOCAL_APP = (Application.builder().token(TOKEN)
-                 .base_url(f"{LOCAL_BOT_API_URL}/bot")
-                 .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
-                 .local_mode(True).build())
-
-_local_ready = False
-
-
-def local_bot():
-    """Возвращает bot локального API, если он готов, иначе None."""
-    if LOCAL_APP is not None and _local_ready:
-        return LOCAL_APP.bot
-    return None
-
-
+# ── Telegram handlers ─────────────────────────────────────────────────────
 async def start(update, context):
-    await update.message.reply_text("🎬 Отправь YouTube ссылку")
-
+    await update.message.reply_text("Отправь YouTube ссылку")
 
 async def handle_message(update, context):
     url = update.message.text.strip()
     if "youtube.com" not in url and "youtu.be" not in url:
-        await update.message.reply_text("❌ Это не YouTube ссылка"); return
-    msg = await update.message.reply_text("🎞 Считаю размеры...")
+        await update.message.reply_text("Это не YouTube ссылка")
+        return
+    msg = await update.message.reply_text("Считаю размеры...")
     try:
         info = await asyncio.to_thread(ydlp_info, url)
-        s = pick_sizes(info)
+        s    = pick_sizes(info)
     except Exception as e:
-        await msg.edit_text(f"❌ Не удалось получить инфо\n{e}"); return
+        await msg.edit_text(f"Не удалось получить инфо\n{e}")
+        return
     title = info.get("title", "видео")
     token = uuid.uuid4().hex[:12]
     PENDING[token] = {"url": url, "title": title, "sizes": s}
     lbl = lambda n, x: f"{n} • ~{mb(x):.0f} MB" if x else f"{n} • ?"
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(lbl("1080p", s["1080"]), callback_data=f"dl|{token}|1080")],
-        [InlineKeyboardButton(lbl("720p", s["720"]), callback_data=f"dl|{token}|720")],
-        [InlineKeyboardButton(lbl("🎵 Аудио", s["audio"]), callback_data=f"dl|{token}|audio")],
+        [InlineKeyboardButton(lbl("1080p",   s["1080"]),  callback_data=f"dl|{token}|1080")],
+        [InlineKeyboardButton(lbl("720p",    s["720"]),   callback_data=f"dl|{token}|720")],
+        [InlineKeyboardButton(lbl("Аудио",   s["audio"]), callback_data=f"dl|{token}|audio")],
     ])
-    await msg.edit_text(f"🎬 {title}\n\nВыбери качество:", reply_markup=kb)
-
+    await msg.edit_text(f"{title}\n\nВыбери качество:", reply_markup=kb)
 
 async def run_progress(cmd, q, prefix):
     proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-    rx = re.compile(r"(\d{1,3}(?:\.\d+)?)%"); last = -5; tail = []
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT
+    )
+    rx = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
+    last = -5
+    tail = []
     async for raw in proc.stdout:
-        line = raw.decode(errors="ignore"); tail.append(line); tail[:] = tail[-15:]
+        line = raw.decode(errors="ignore")
+        tail.append(line)
+        tail[:] = tail[-15:]
         m = rx.search(line)
         if m:
             p = float(m.group(1))
             if p - last >= 5:
                 last = p
-                try: await q.edit_message_text(f"{prefix}\n⏳ {p:.0f}%")
-                except: pass
+                try:
+                    await q.edit_message_text(f"{prefix}\n{p:.0f}%")
+                except:
+                    pass
     await proc.wait()
     return proc.returncode, "".join(tail[-6:])
 
-
 async def upload_to_rf(q, filepath, mode, title, size):
     if not RF_WORKER_URL:
-        await q.edit_message_text("❌ RF_WORKER_URL не настроен"); return
-    await q.edit_message_text(f"📤 Заливаю на сервер... 📦 {size:.0f} MB")
-    ext = os.path.splitext(filepath)[1] or ".mp4"
+        await q.edit_message_text("RF_WORKER_URL не настроен")
+        return
+    await q.edit_message_text(f"Заливаю на сервер... {size:.0f} MB")
+    ext     = os.path.splitext(filepath)[1] or ".mp4"
     headers = {"X-Secret": WORKER_SECRET}
     try:
         async with httpx.AsyncClient(timeout=None) as cl:
             with open(filepath, "rb") as fh:
                 files = {"file": ("v" + ext, fh, "application/octet-stream")}
-                data = {"title": title, "ext": ext}
+                data  = {"title": title, "ext": ext}
                 r = await cl.post(f"{RF_WORKER_URL}/upload",
                                   files=files, data=data, headers=headers)
                 r.raise_for_status()
                 resp = r.json()
     except Exception as e:
-        await q.edit_message_text(f"❌ Не удалось залить файл\n{e}"); return
-    job = resp["job_id"]; dl_token = resp["dl_token"]
-    real_mb = resp.get("size_mb") or size
+        await q.edit_message_text(f"Не удалось залить файл\n{e}")
+        return
+    job      = resp["job_id"]
+    dl_token = resp["dl_token"]
+    real_mb  = resp.get("size_mb") or size
     file_url = f"{RF_WORKER_URL}/jobs/{job}/file?t={dl_token}"
-    qlabel = "🎵 Аудио" if mode == "audio" else f"🎞 {mode}p"
+    qlabel   = "Аудио" if mode == "audio" else f"{mode}p"
     await q.edit_message_text(
-        f"✅ Готово\n{title}\n{qlabel} • 📦 {real_mb:.1f} MB\n\n"
-        f"📥 Скачать файл (нажми ссылку):\n{file_url}\n\n"
-        f"⚠️ Ссылка активна ~10 минут.",
-        disable_web_page_preview=True)
-
+        f"Готово\n{title}\n{qlabel} {real_mb:.1f} MB\n\n"
+        f"Скачать файл (нажми ссылку):\n{file_url}\n\n"
+        f"Ссылка активна ~10 минут.",
+        disable_web_page_preview=True
+    )
 
 async def on_railway(q, url, mode, title):
     chat_id = q.message.chat_id
-    prefix = "📥 Скачивание (аудио)..." if mode == "audio" else f"📥 Скачивание ({mode}p)..."
+    prefix  = "Скачивание (аудио)..." if mode == "audio" else f"Скачивание ({mode}p)..."
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "v.%(ext)s")
-        rc, err = 1, ""
-        # Сначала с куки (если заданы), потом без куки
-        for opts in common_attempts():
-            for x in os.listdir(tmp):
-                try: os.remove(os.path.join(tmp, x))
-                except: pass
-            cmd = ["yt-dlp", *opts, "-N", "4", "-f", fmt_for(mode),
-                   "-S", "res,fps,vcodec:h264", "--newline", "-o", out, url]
-            cmd += ["-x", "--audio-format", "m4a"] if mode == "audio" else ["--merge-output-format", "mp4"]
+        # Сначала пробуем с куки, потом без
+        attempts = []
+        if COOKIES_FILE:
+            attempts.append(COMMON)
+        attempts.append(COMMON_NO_COOKIES)
+
+        rc, err = -1, ""
+        for common_args in attempts:
+            cmd  = ["yt-dlp", *common_args, "-N", "4", "-f", fmt_for(mode),
+                    "--newline", "-o", out, url]
+            cmd += ["-x", "--audio-format", "m4a"] if mode == "audio" \
+                   else ["--merge-output-format", "mp4"]
             rc, err = await run_progress(cmd, q, prefix)
             if rc == 0:
                 break
+
         if rc != 0:
-            await q.edit_message_text(f"❌ Ошибка yt-dlp\n{err[:800]}"); return
+            await q.edit_message_text(f"Ошибка yt-dlp\n{err[:800]}")
+            return
+
         f = next((os.path.join(tmp, x) for x in os.listdir(tmp)), None)
         if not f:
-            await q.edit_message_text("❌ Файл не найден"); return
+            await q.edit_message_text("Файл не найден")
+            return
+
         size = os.path.getsize(f) / 1024 / 1024
 
-        # > 200 МБ → только ссылка через РФ-воркер
         if size > TG_DIRECT_MB:
-            await upload_to_rf(q, f, mode, title, size); return
+            await upload_to_rf(q, f, mode, title, size)
+            return
 
         if mode == "audio":
-            quality = "🎵 Аудио"
+            quality = "Аудио"
         else:
-            real = await asyncio.to_thread(get_real_resolution, f)
-            quality = f"🎞 {real}"
-        cap = f"{title}\n\n{quality} • 📦 {size:.1f} MB"
+            real    = await asyncio.to_thread(get_real_resolution, f)
+            quality = f"{real}"
+        cap = f"{title}\n\n{quality} {size:.1f} MB"
 
-        # ≤ 49 МБ → облачный Bot API; 49–200 МБ → локальный Bot API
         if size <= 49:
             app_bot = NORMAL_APP.bot
+        elif LOCAL_BOT is not None:
+            app_bot = LOCAL_BOT
         else:
-            app_bot = local_bot()
-            if app_bot is None:
-                # локальный API реально недоступен → запасной путь: ссылка
-                await upload_to_rf(q, f, mode, title, size); return
+            await upload_to_rf(q, f, mode, title, size)
+            return
 
-        await q.edit_message_text(f"📤 Отправка...\n{quality} • 📦 {size:.1f} MB")
+        await q.edit_message_text(f"Отправка...\n{quality} {size:.1f} MB")
         try:
             with open(f, "rb") as fh:
                 if mode == "audio":
-                    await app_bot.send_audio(chat_id=chat_id, audio=fh, caption=cap,
-                                             read_timeout=1200, write_timeout=1200)
+                    await app_bot.send_audio(
+                        chat_id=chat_id, audio=fh, caption=cap,
+                        read_timeout=1200, write_timeout=1200
+                    )
                 else:
-                    await app_bot.send_video(chat_id=chat_id, video=fh, caption=cap,
-                                             supports_streaming=True,
-                                             read_timeout=1200, write_timeout=1200)
+                    await app_bot.send_video(
+                        chat_id=chat_id, video=fh, caption=cap,
+                        supports_streaming=True,
+                        read_timeout=1200, write_timeout=1200
+                    )
         except Exception as e:
             print(f"[send failed] {e}")
-            await upload_to_rf(q, f, mode, title, size); return
-        try: await q.message.delete()
-        except: pass
-
+            await upload_to_rf(q, f, mode, title, size)
+            return
+        try:
+            await q.message.delete()
+        except:
+            pass
 
 async def on_choice(update, context):
-    q = update.callback_query; await q.answer()
+    q = update.callback_query
+    await q.answer()
     _, token, mode = q.data.split("|")
     data = PENDING.get(token)
     if not data:
-        await q.edit_message_text("⌛ Ссылка устарела, пришли заново"); return
+        await q.edit_message_text("Ссылка устарела, пришли заново")
+        return
     url, title = data["url"], data["title"]
-    await q.edit_message_text(f"📥 Готовлю ({'аудио' if mode=='audio' else mode+'p'})...")
+    await q.edit_message_text(
+        f"Готовлю ({'аудио' if mode == 'audio' else mode + 'p'})..."
+    )
     await on_railway(q, url, mode, title)
 
-
-async def post_init(app):
-    """Инициализируем локальный Bot API один раз при старте."""
-    global _local_ready
-    if LOCAL_APP is None:
-        print("[local API] LOCAL_BOT_API_URL не задан — большие файлы пойдут на РФ-воркер")
-        return
-    try:
-        await LOCAL_APP.initialize()
-        _local_ready = True
-        print("[local API готов] файлы 49–200 МБ отправляются напрямую в чат")
-    except Exception as e:
-        _local_ready = False
-        print(f"[local API недоступен] {e}")
-
-
-async def post_shutdown(app):
-    if LOCAL_APP is not None and _local_ready:
-        try:
-            await LOCAL_APP.shutdown()
-        except Exception:
-            pass
-
-
-NORMAL_APP = (Application.builder().token(TOKEN)
-              .post_init(post_init).post_shutdown(post_shutdown).build())
-
+# ── App ───────────────────────────────────────────────────────────────────
+NORMAL_APP = (
+    Application.builder()
+    .token(TOKEN)
+    .post_init(post_init)
+    .build()
+)
 
 def main():
     NORMAL_APP.add_handler(CommandHandler("start", start))
@@ -305,7 +334,6 @@ def main():
     NORMAL_APP.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("BOT STARTED")
     NORMAL_APP.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
