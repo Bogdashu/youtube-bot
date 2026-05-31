@@ -8,7 +8,9 @@ RF_WORKER_URL = os.getenv("RF_WORKER_URL")
 WORKER_SECRET = os.getenv("WORKER_SECRET")
 LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")
 
-TG_DIRECT_MB = 100
+TG_DIRECT_MB   = 100    # до этого РЕАЛЬНОГО размера шлём прямо в чат
+RAILWAY_TRY_MB = 300    # если ПРОГНОЗ больше — не качаем на Railway, сразу на РФ
+APPROX_FACTOR  = 0.5    # filesize_approx у YouTube завышен ~вдвое → корректируем
 PENDING = {}
 
 COMMON = ["--js-runtimes", "node", "--no-playlist",
@@ -22,10 +24,13 @@ def ydlp_info(url):
 def _sz(f):
     if not f:
         return 0
-    return f.get("filesize") or f.get("filesize_approx") or 0
+    if f.get("filesize"):
+        return f.get("filesize")                                  # точный — как есть
+    if f.get("filesize_approx"):
+        return int(f.get("filesize_approx") * APPROX_FACTOR)      # приблизительный — корректируем
+    return 0
 
 def _best(cands):
-    # как сортирует yt-dlp по умолчанию: выше разрешение, потом fps, потом битрейт
     if not cands:
         return None
     return max(cands, key=lambda f: ((f.get("height") or 0),
@@ -37,17 +42,14 @@ def pick_sizes(info):
     vids = [f for f in fmts if f.get("vcodec") != "none" and f.get("acodec") == "none"]
     auds = [f for f in fmts if f.get("acodec") != "none" and f.get("vcodec") == "none"]
 
-    # аудио: как ba[ext=m4a]/ba — сначала m4a, потом любой
     a_m4a = [f for f in auds if f.get("ext") == "m4a"]
     a_size = _sz(_best(a_m4a) or _best(auds))
 
     def vid_total(maxh):
         pool = [f for f in vids if (f.get("height") or 0) <= maxh]
         if pool:
-            # как bv*[height<=h][ext=mp4] / bv*[height<=h] — сначала mp4, потом любой
             mp4 = [f for f in pool if f.get("ext") == "mp4"]
             return _sz(_best(mp4) or _best(pool)) + a_size
-        # запасной вариант: совмещённые форматы b[height<=h]
         comb = [f for f in fmts if f.get("vcodec") != "none" and f.get("acodec") != "none"
                 and (f.get("height") or 0) <= maxh]
         cmp4 = [f for f in comb if f.get("ext") == "mp4"]
@@ -150,7 +152,7 @@ async def on_railway(q, url, mode, title):
         if not f:
             await q.edit_message_text("❌ Файл не найден"); return
         size = os.path.getsize(f) / 1024 / 1024
-        if size > TG_DIRECT_MB:
+        if size > TG_DIRECT_MB:                       # решаем по РЕАЛЬНОМУ размеру
             await q.edit_message_text("📥 Готовлю файл...")
             await on_worker(q, url, mode, title, size); return
         if mode == "audio":
@@ -210,7 +212,7 @@ async def on_worker(q, url, mode, title, size_mb):
             if st["state"] == "error":
                 await q.edit_message_text(f"❌ Ошибка загрузки\n{st.get('error','')[:600]}"); return
             if st["state"] == "done":
-                real_mb = st.get("size_mb") or size_mb       # реальный размер файла
+                real_mb = st.get("size_mb") or size_mb
                 break
             p = st.get("percent", 0)
             if p - last >= 5:
@@ -235,7 +237,9 @@ async def on_choice(update, context):
     url, title, s = data["url"], data["title"], data["sizes"]
     size_mb = mb(s[mode])
     await q.edit_message_text(f"📥 Готовлю ({'аудио' if mode=='audio' else mode+'p'})...")
-    if mode != "audio" and size_mb > TG_DIRECT_MB:
+    # Только заведомо большое (по прогнозу) сразу уходит на РФ — чтобы не качать его на Railway.
+    # Остальное качаем на Railway и решаем чат/ссылка по РЕАЛЬНОМУ размеру файла.
+    if mode != "audio" and size_mb > RAILWAY_TRY_MB:
         await on_worker(q, url, mode, title, size_mb)
     else:
         await on_railway(q, url, mode, title)
