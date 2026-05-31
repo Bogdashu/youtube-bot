@@ -18,7 +18,7 @@ if _cookies_b64:
 # --- Единственное определение COMMON (базовые флаги yt-dlp) ---
 COMMON = ["--js-runtimes", "node", "--no-playlist",
           "--socket-timeout", "30", "--retries", "5",
-          "--extractor-args", "youtube:player_client=android_vr,web"]
+          "--extractor-args", "youtube:player_client=web_safari,android,web"]
 
 TG_DIRECT_MB = 200
 VIDEO_FACTOR = 0.5
@@ -95,9 +95,10 @@ def fmt_for(mode):
     if mode == "audio":
         return "bestaudio[ext=m4a]/bestaudio/best"
     h = 1080 if mode == "1080" else 720
-    return (f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/"
-            f"bv*[height<={h}]+ba/"
-            f"b[height<={h}][ext=mp4]/b[height<={h}]/b")
+    # Раздельные потоки (DASH) = высокое качество; прогрессив (360p) — только крайний случай
+    return (f"bv*[height<={h}]+ba/"
+            f"bv*[height<={h}]/"
+            f"b[height<={h}]")
 
 
 def get_real_resolution(filepath):
@@ -210,7 +211,8 @@ async def on_railway(q, url, mode, title):
             for x in os.listdir(tmp):
                 try: os.remove(os.path.join(tmp, x))
                 except: pass
-            cmd = ["yt-dlp", *opts, "-N", "4", "-f", fmt_for(mode), "--newline", "-o", out, url]
+            cmd = ["yt-dlp", *opts, "-N", "4", "-f", fmt_for(mode),
+                   "-S", "res,fps,vcodec:h264", "--newline", "-o", out, url]
             cmd += ["-x", "--audio-format", "m4a"] if mode == "audio" else ["--merge-output-format", "mp4"]
             rc, err = await run_progress(cmd, q, prefix)
             if rc == 0:
