@@ -37,10 +37,15 @@ def ydlp_info(url):
         raise RuntimeError(err[-800:])   # покажем настоящую ошибку
     return json.loads(p.stdout)
 
-def _sz(f):
+def _fmt_size(f):
+    # Точный filesize берём как есть; только filesize_approx уменьшаем.
     if not f:
         return 0
-    return f.get("filesize") or f.get("filesize_approx") or 0   # сырой размер
+    if f.get("filesize"):
+        return f["filesize"]
+    if f.get("filesize_approx"):
+        return int(f["filesize_approx"] * VIDEO_FACTOR)
+    return 0
 
 def _best(cands):
     if not cands:
