@@ -59,7 +59,6 @@ if LOCAL_BOT_API_URL:
 
 _local_ready = False
 async def get_local_bot():
-    """Возвращает bot локального API или None, если он недоступен."""
     global _local_ready
     if LOCAL_APP is None:
         return None
@@ -113,7 +112,6 @@ async def run_progress(cmd, q, prefix):
     return proc.returncode, "".join(tail[-6:])
 
 async def on_railway(q, url, mode, title):
-    """≤100 МБ: качаем и заливаем (≤49 облачный, 49–100 локальный API, иначе — ссылкой)."""
     chat_id = q.message.chat_id
     prefix = "📥 Скачивание (аудио)..." if mode == "audio" else f"📥 Скачивание ({mode}p)..."
     with tempfile.TemporaryDirectory() as tmp:
@@ -137,12 +135,11 @@ async def on_railway(q, url, mode, title):
             quality = f"🎞 {real}"
         cap = f"{title}\n\n{quality} • 📦 {size:.1f} MB"
 
-        # выбираем, через что слать
         if size <= 49:
             app_bot = NORMAL_APP.bot
         else:
             app_bot = await get_local_bot()
-            if app_bot is None:                       # локальный API недоступен — ссылкой
+            if app_bot is None:
                 await q.edit_message_text("📥 Готовлю файл...")
                 await on_worker(q, url, mode, title, size); return
 
@@ -156,7 +153,7 @@ async def on_railway(q, url, mode, title):
                     await app_bot.send_video(chat_id=chat_id, video=fh, caption=cap,
                                              supports_streaming=True,
                                              read_timeout=1200, write_timeout=1200)
-        except Exception as e:                        # заливка упала — отдаём ссылкой
+        except Exception as e:
             print(f"[send failed] {e}")
             await q.edit_message_text("📥 Готовлю файл...")
             await on_worker(q, url, mode, title, size); return
@@ -164,13 +161,14 @@ async def on_railway(q, url, mode, title):
         except: pass
 
 async def on_worker(q, url, mode, title, size_mb):
-    """>100 МБ или фолбэк: качает РФ-сервер, бот присылает прямую ссылку (одноразовый токен)."""
     if not RF_WORKER_URL:
         await q.edit_message_text("❌ RF_WORKER_URL не настроен"); return
     headers = {"X-Secret": WORKER_SECRET}
+    real_mb = size_mb
     async with httpx.AsyncClient(timeout=60) as cl:
         try:
-            r = await cl.post(f"{RF_WORKER_URL}/jobs", json={"url": url, "mode": mode}, headers=headers)
+            r = await cl.post(f"{RF_WORKER_URL}/jobs",
+                              json={"url": url, "mode": mode, "title": title}, headers=headers)
             r.raise_for_status()
             resp = r.json()
             job = resp["job_id"]
@@ -186,7 +184,9 @@ async def on_worker(q, url, mode, title, size_mb):
                 continue
             if st["state"] == "error":
                 await q.edit_message_text(f"❌ Ошибка загрузки\n{st.get('error','')[:600]}"); return
-            if st["state"] == "done": break
+            if st["state"] == "done":
+                real_mb = st.get("size_mb") or size_mb       # реальный размер файла
+                break
             p = st.get("percent", 0)
             if p - last >= 5:
                 last = p
@@ -196,7 +196,7 @@ async def on_worker(q, url, mode, title, size_mb):
     file_url = f"{RF_WORKER_URL}/jobs/{job}/file?t={dl_token}"
     qlabel = "🎵 Аудио" if mode == "audio" else f"🎞 {mode}p"
     await q.edit_message_text(
-        f"✅ Готово\n{title}\n{qlabel} • 📦 ~{size_mb:.0f} MB\n\n"
+        f"✅ Готово\n{title}\n{qlabel} • 📦 {real_mb:.1f} MB\n\n"
         f"📥 Скачать файл (нажми ссылку):\n{file_url}\n\n"
         f"⚠️ Ссылка активна ~10 минут.",
         disable_web_page_preview=True)
