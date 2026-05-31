@@ -56,12 +56,18 @@ async def post_init(application):
             LOCAL_BOT = None
 
 # ── yt-dlp helpers ───────────────────────────────────────────────────────
+# Для получения инфо о форматах НЕ используем android_vr:
+# он возвращает только комбинированные форматы без DASH-потоков,
+# из-за чего оценка размера 1080p == 720p. Стандартный клиент
+# возвращает нормальные DASH-потоки с высотами и битрейтами.
+_INFO_BASE = ["--no-playlist", "--socket-timeout", "30"]
+
 def ydlp_info(url):
-    """Сначала пробуем с куки, потом без."""
+    """Запрашиваем список форматов стандартным клиентом (для оценки размера)."""
     attempts = []
     if COOKIES_FILE:
-        attempts.append(COMMON)
-    attempts.append(COMMON_NO_COOKIES)
+        attempts.append([*_INFO_BASE, "--cookies", COOKIES_FILE])
+    attempts.append(list(_INFO_BASE))
     last_err = "yt-dlp failed"
     for args in attempts:
         p = subprocess.run(["yt-dlp", *args, "-J", url],
