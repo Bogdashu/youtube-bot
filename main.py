@@ -8,6 +8,19 @@ RF_WORKER_URL = os.getenv("RF_WORKER_URL")
 WORKER_SECRET = os.getenv("WORKER_SECRET")
 LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")
 
+COOKIES_FILE = None
+_cookies_b64 = os.getenv("YT_COOKIES_B64")
+if _cookies_b64:
+    COOKIES_FILE = "/tmp/cookies.txt"
+    with open(COOKIES_FILE, "wb") as _cf:
+        _cf.write(base64.b64decode(_cookies_b64))
+
+COMMON = ["--js-runtimes", "node", "--no-playlist",
+          "--socket-timeout", "30", "--retries", "5",
+          "--extractor-args", "youtube:player_client=android_vr,web"]
+if COOKIES_FILE:
+    COMMON += ["--cookies", COOKIES_FILE]
+
 TG_DIRECT_MB = 200
 VIDEO_FACTOR = 0.5
 PENDING = {}
