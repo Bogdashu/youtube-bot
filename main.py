@@ -101,11 +101,13 @@ def pick_sizes(info):
     dur  = info.get("duration") or 0  # длительность в секундах
 
     # Все видео-только форматы (без ограничения по высоте — только для оценки размера)
+    # ВАЖНО: acodec/vcodec бывает и строка "none", и Python None — проверяем оба варианта
     vids = [f for f in fmts
-            if f.get("vcodec") != "none"
-            and f.get("acodec") == "none"]
+            if f.get("vcodec") not in (None, "none")
+            and f.get("acodec") in (None, "none")]
     auds = [f for f in fmts
-            if f.get("acodec") != "none" and f.get("vcodec") == "none"]
+            if f.get("acodec") not in (None, "none")
+            and f.get("vcodec") in (None, "none")]
 
     a_m4a  = [f for f in auds if f.get("ext") == "m4a"]
     best_a = _best(a_m4a) or _best(auds)
