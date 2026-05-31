@@ -13,7 +13,7 @@ RAILWAY_TRY_MB = 250    # если ПРОГНОЗ больше — не кача
 PENDING = {}
 
 COMMON = ["--js-runtimes", "node", "--no-playlist",
-          "--extractor-args", "youtube:player_client=android_vr,web"]
+          "--extractor-args", "youtube:player_client=android_vr,tv"]
 
 def ydlp_info(url):
     out = subprocess.check_output(["yt-dlp", *COMMON, "-J", url],
