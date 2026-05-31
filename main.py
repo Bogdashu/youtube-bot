@@ -31,18 +31,29 @@ TG_DIRECT_MB = 120
 PENDING = {}
 
 # ── LOCAL Bot API ─────────────────────────────────────────────────────────
-# Создаём bot-объект напрямую, без initialize() — так работал старый код
-LOCAL_BOT = None
+LOCAL_APP = None
+LOCAL_BOT = None   # инициализируется в post_init
+
 if LOCAL_BOT_API_URL:
-    LOCAL_BOT = (
+    LOCAL_APP = (
         Application.builder()
         .token(TOKEN)
         .base_url(f"{LOCAL_BOT_API_URL}/bot")
         .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
         .local_mode(True)
         .build()
-    ).bot
-    print(f"[local API] настроен: {LOCAL_BOT_API_URL}")
+    )
+
+async def post_init(application):
+    global LOCAL_BOT
+    if LOCAL_APP is not None:
+        try:
+            await LOCAL_APP.initialize()
+            LOCAL_BOT = LOCAL_APP.bot
+            print("[local API] OK инициализирован")
+        except Exception as e:
+            print(f"[local API] FAIL недоступен: {e}")
+            LOCAL_BOT = None
 
 # ── yt-dlp helpers ───────────────────────────────────────────────────────
 # Для получения инфо о форматах НЕ используем android_vr:
@@ -277,14 +288,11 @@ async def on_railway(q, url, mode, title):
             quality = f"🎞 {real}"
         cap = f"{title}\n\n{quality} • 📦 {size:.1f} MB"
 
-        if size <= 49.5:
-            # Облачный Bot API принимает макс 50 МБ
+        if size <= 49:
             app_bot = NORMAL_APP.bot
         elif LOCAL_BOT is not None:
-            # Локальный Bot API — без лимита 50 МБ
             app_bot = LOCAL_BOT
         else:
-            # Локального API нет — файл идёт на RF-воркер
             await upload_to_rf(q, f, mode, title, size)
             return
 
@@ -320,26 +328,16 @@ async def on_choice(update, context):
         await q.edit_message_text("⌛ Ссылка устарела, пришли заново")
         return
     url, title = data["url"], data["title"]
-    est_bytes = data["sizes"].get(mode) or 0
-    est_mb    = est_bytes / 1024 / 1024
-
-    qlabel = "аудио" if mode == "audio" else f"{mode}p"
-    await q.edit_message_text(f"📥 Готовлю ({qlabel})...")
-
-    # Если оценка уже > лимита — сразу на воркер, без локальной загрузки
-    if est_mb > TG_DIRECT_MB and RF_WORKER_URL:
-        await q.edit_message_text(
-            f"📈 Файл большой (~{est_mb:.0f} MB), сразу отправляю на сервер..."
-        )
-        await rf_download_and_serve(q, url, mode, title, est_mb)
-        return
-
+    await q.edit_message_text(
+        f"📥 Готовлю ({'аудио' if mode == 'audio' else mode + 'p'})..."
+    )
     await on_railway(q, url, mode, title)
 
 # ── App ───────────────────────────────────────────────────────────────────
 NORMAL_APP = (
     Application.builder()
     .token(TOKEN)
+    .post_init(post_init)
     .build()
 )
 
