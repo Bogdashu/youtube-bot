@@ -15,30 +15,39 @@ if _cookies_b64:
     with open(COOKIES_FILE, "wb") as _cf:
         _cf.write(base64.b64decode(_cookies_b64))
 
+# --- Единственное определение COMMON (базовые флаги yt-dlp) ---
 COMMON = ["--js-runtimes", "node", "--no-playlist",
           "--socket-timeout", "30", "--retries", "5",
           "--extractor-args", "youtube:player_client=android_vr,web"]
-if COOKIES_FILE:
-    COMMON += ["--cookies", COOKIES_FILE]
 
 TG_DIRECT_MB = 200
 VIDEO_FACTOR = 0.5
 PENDING = {}
 
-COMMON = ["--js-runtimes", "node", "--no-playlist",
-          "--socket-timeout", "30", "--retries", "5",
-          "--extractor-args", "youtube:player_client=android_vr,web"]
+
+def common_attempts():
+    """Сначала пробуем с куки (если заданы), потом без куки."""
+    attempts = []
+    if COOKIES_FILE:
+        attempts.append(COMMON + ["--cookies", COOKIES_FILE])
+    attempts.append(list(COMMON))
+    return attempts
+
 
 def ydlp_info(url):
-    p = subprocess.run(["yt-dlp", *COMMON, "-J", url],
-                       capture_output=True, text=True)
-    if p.returncode != 0:
-        err = (p.stderr or p.stdout or "yt-dlp failed").strip()
-        raise RuntimeError(err[-800:])   # покажем настоящую ошибку
-    return json.loads(p.stdout)
+    last_err = "yt-dlp failed"
+    for opts in common_attempts():
+        p = subprocess.run(["yt-dlp", *opts, "-J", url],
+                           capture_output=True, text=True)
+        if p.returncode == 0:
+            return json.loads(p.stdout)
+        last_err = (p.stderr or p.stdout or "yt-dlp failed").strip()
+    raise RuntimeError(last_err[-800:])
+
 
 def _fmt_size(f):
-    # Точный filesize берём как есть; только filesize_approx уменьшаем.
+    """Размер формата для предпросмотра.
+    Точный filesize берём как есть; только filesize_approx уменьшаем."""
     if not f:
         return 0
     if f.get("filesize"):
@@ -47,6 +56,7 @@ def _fmt_size(f):
         return int(f["filesize_approx"] * VIDEO_FACTOR)
     return 0
 
+
 def _best(cands):
     if not cands:
         return None
@@ -54,30 +64,32 @@ def _best(cands):
                                      (f.get("fps") or 0),
                                      (f.get("tbr") or 0)))
 
+
 def pick_sizes(info):
     fmts = info.get("formats", [])
     vids = [f for f in fmts if f.get("vcodec") != "none" and f.get("acodec") == "none"]
     auds = [f for f in fmts if f.get("acodec") != "none" and f.get("vcodec") == "none"]
 
     a_m4a = [f for f in auds if f.get("ext") == "m4a"]
-    a_size = _sz(_best(a_m4a) or _best(auds))   # аудио как есть (оно точное)
+    a_size = _fmt_size(_best(a_m4a) or _best(auds))
 
     def vid_total(maxh):
         pool = [f for f in vids if (f.get("height") or 0) <= maxh]
         if pool:
             mp4 = [f for f in pool if f.get("ext") == "mp4"]
-            return _sz(_best(mp4) or _best(pool)) + a_size
+            return _fmt_size(_best(mp4) or _best(pool)) + a_size
         comb = [f for f in fmts if f.get("vcodec") != "none" and f.get("acodec") != "none"
                 and (f.get("height") or 0) <= maxh]
         cmp4 = [f for f in comb if f.get("ext") == "mp4"]
-        return _sz(_best(cmp4) or _best(comb))
+        return _fmt_size(_best(cmp4) or _best(comb))
 
-    # фактор применяем к ИТОГУ по видео; аудио не трогаем
-    return {"1080": int(vid_total(1080) * VIDEO_FACTOR),
-            "720":  int(vid_total(720)  * VIDEO_FACTOR),
+    return {"1080": vid_total(1080),
+            "720": vid_total(720),
             "audio": a_size}
 
+
 mb = lambda b: b / 1024 / 1024
+
 
 def fmt_for(mode):
     if mode == "audio":
@@ -86,6 +98,7 @@ def fmt_for(mode):
     return (f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/"
             f"bv*[height<={h}]+ba/"
             f"b[height<={h}][ext=mp4]/b[height<={h}]/b")
+
 
 def get_real_resolution(filepath):
     try:
@@ -96,7 +109,8 @@ def get_real_resolution(filepath):
     except Exception:
         return "unknown"
 
-# ---- локальный Bot API: ленивая инициализация ----
+
+# --- Локальный Bot API: строим объект, инициализируем один раз при старте ---
 LOCAL_APP = None
 if LOCAL_BOT_API_URL:
     LOCAL_APP = (Application.builder().token(TOKEN)
@@ -105,21 +119,18 @@ if LOCAL_BOT_API_URL:
                  .local_mode(True).build())
 
 _local_ready = False
-async def get_local_bot():
-    global _local_ready
-    if LOCAL_APP is None:
-        return None
-    if not _local_ready:
-        try:
-            await LOCAL_APP.initialize()
-            _local_ready = True
-        except Exception as e:
-            print(f"[local API недоступен] {e}")
-            return None
-    return LOCAL_APP.bot
+
+
+def local_bot():
+    """Возвращает bot локального API, если он готов, иначе None."""
+    if LOCAL_APP is not None and _local_ready:
+        return LOCAL_APP.bot
+    return None
+
 
 async def start(update, context):
     await update.message.reply_text("🎬 Отправь YouTube ссылку")
+
 
 async def handle_message(update, context):
     url = update.message.text.strip()
@@ -137,10 +148,11 @@ async def handle_message(update, context):
     lbl = lambda n, x: f"{n} • ~{mb(x):.0f} MB" if x else f"{n} • ?"
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(lbl("1080p", s["1080"]), callback_data=f"dl|{token}|1080")],
-        [InlineKeyboardButton(lbl("720p",  s["720"]),  callback_data=f"dl|{token}|720")],
+        [InlineKeyboardButton(lbl("720p", s["720"]), callback_data=f"dl|{token}|720")],
         [InlineKeyboardButton(lbl("🎵 Аудио", s["audio"]), callback_data=f"dl|{token}|audio")],
     ])
     await msg.edit_text(f"🎬 {title}\n\nВыбери качество:", reply_markup=kb)
+
 
 async def run_progress(cmd, q, prefix):
     proc = await asyncio.create_subprocess_exec(
@@ -158,8 +170,8 @@ async def run_progress(cmd, q, prefix):
     await proc.wait()
     return proc.returncode, "".join(tail[-6:])
 
+
 async def upload_to_rf(q, filepath, mode, title, size):
-    """Заливает уже скачанный файл на РФ и отдаёт ссылку. РФ ничего не качает."""
     if not RF_WORKER_URL:
         await q.edit_message_text("❌ RF_WORKER_URL не настроен"); return
     await q.edit_message_text(f"📤 Заливаю на сервер... 📦 {size:.0f} MB")
@@ -186,14 +198,23 @@ async def upload_to_rf(q, filepath, mode, title, size):
         f"⚠️ Ссылка активна ~10 минут.",
         disable_web_page_preview=True)
 
+
 async def on_railway(q, url, mode, title):
     chat_id = q.message.chat_id
     prefix = "📥 Скачивание (аудио)..." if mode == "audio" else f"📥 Скачивание ({mode}p)..."
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "v.%(ext)s")
-        cmd = ["yt-dlp", *COMMON, "-N", "4", "-f", fmt_for(mode), "--newline", "-o", out, url]
-        cmd += ["-x", "--audio-format", "m4a"] if mode == "audio" else ["--merge-output-format", "mp4"]
-        rc, err = await run_progress(cmd, q, prefix)
+        rc, err = 1, ""
+        # Сначала с куки (если заданы), потом без куки
+        for opts in common_attempts():
+            for x in os.listdir(tmp):
+                try: os.remove(os.path.join(tmp, x))
+                except: pass
+            cmd = ["yt-dlp", *opts, "-N", "4", "-f", fmt_for(mode), "--newline", "-o", out, url]
+            cmd += ["-x", "--audio-format", "m4a"] if mode == "audio" else ["--merge-output-format", "mp4"]
+            rc, err = await run_progress(cmd, q, prefix)
+            if rc == 0:
+                break
         if rc != 0:
             await q.edit_message_text(f"❌ Ошибка yt-dlp\n{err[:800]}"); return
         f = next((os.path.join(tmp, x) for x in os.listdir(tmp)), None)
@@ -201,7 +222,7 @@ async def on_railway(q, url, mode, title):
             await q.edit_message_text("❌ Файл не найден"); return
         size = os.path.getsize(f) / 1024 / 1024
 
-        # больше TG_DIRECT_MB — ссылкой (заливаем готовый файл на РФ, без повторного скачивания)
+        # > 200 МБ → только ссылка через РФ-воркер
         if size > TG_DIRECT_MB:
             await upload_to_rf(q, f, mode, title, size); return
 
@@ -212,11 +233,13 @@ async def on_railway(q, url, mode, title):
             quality = f"🎞 {real}"
         cap = f"{title}\n\n{quality} • 📦 {size:.1f} MB"
 
+        # ≤ 49 МБ → облачный Bot API; 49–200 МБ → локальный Bot API
         if size <= 49:
             app_bot = NORMAL_APP.bot
         else:
-            app_bot = await get_local_bot()
+            app_bot = local_bot()
             if app_bot is None:
+                # локальный API реально недоступен → запасной путь: ссылка
                 await upload_to_rf(q, f, mode, title, size); return
 
         await q.edit_message_text(f"📤 Отправка...\n{quality} • 📦 {size:.1f} MB")
@@ -235,6 +258,7 @@ async def on_railway(q, url, mode, title):
         try: await q.message.delete()
         except: pass
 
+
 async def on_choice(update, context):
     q = update.callback_query; await q.answer()
     _, token, mode = q.data.split("|")
@@ -243,9 +267,35 @@ async def on_choice(update, context):
         await q.edit_message_text("⌛ Ссылка устарела, пришли заново"); return
     url, title = data["url"], data["title"]
     await q.edit_message_text(f"📥 Готовлю ({'аудио' if mode=='audio' else mode+'p'})...")
-    await on_railway(q, url, mode, title)   # всегда качаем на Railway
+    await on_railway(q, url, mode, title)
 
-NORMAL_APP = Application.builder().token(TOKEN).build()
+
+async def post_init(app):
+    """Инициализируем локальный Bot API один раз при старте."""
+    global _local_ready
+    if LOCAL_APP is None:
+        print("[local API] LOCAL_BOT_API_URL не задан — большие файлы пойдут на РФ-воркер")
+        return
+    try:
+        await LOCAL_APP.initialize()
+        _local_ready = True
+        print("[local API готов] файлы 49–200 МБ отправляются напрямую в чат")
+    except Exception as e:
+        _local_ready = False
+        print(f"[local API недоступен] {e}")
+
+
+async def post_shutdown(app):
+    if LOCAL_APP is not None and _local_ready:
+        try:
+            await LOCAL_APP.shutdown()
+        except Exception:
+            pass
+
+
+NORMAL_APP = (Application.builder().token(TOKEN)
+              .post_init(post_init).post_shutdown(post_shutdown).build())
+
 
 def main():
     NORMAL_APP.add_handler(CommandHandler("start", start))
@@ -253,6 +303,7 @@ def main():
     NORMAL_APP.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("BOT STARTED")
     NORMAL_APP.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
