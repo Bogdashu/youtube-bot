@@ -8,9 +8,9 @@ RF_WORKER_URL = os.getenv("RF_WORKER_URL")
 WORKER_SECRET = os.getenv("WORKER_SECRET")
 LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")
 
-TG_DIRECT_MB  = 100     # до этого РЕАЛЬНОГО размера шлём в чат
-RAILWAY_TRY_MB = 250    # если ПРОГНОЗ больше — сразу ссылкой с РФ, не качаем на Railway
-VIDEO_FACTOR  = 0.5     # YouTube завышает размер видео ~вдвое → делим прогноз пополам
+TG_DIRECT_MB  = 100
+RAILWAY_TRY_MB = 250
+VIDEO_FACTOR  = 0.5
 PENDING = {}
 
 COMMON = ["--js-runtimes", "node", "--no-playlist",
