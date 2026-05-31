@@ -1,4 +1,4 @@
-import os, re, json, uuid, asyncio, tempfile, subprocess, httpx
+import os, re, json, uuid, asyncio, tempfile, subprocess, base64, httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (Application, CommandHandler, MessageHandler,
                           CallbackQueryHandler, filters)
