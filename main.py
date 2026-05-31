@@ -8,7 +8,7 @@ RF_WORKER_URL = os.getenv("RF_WORKER_URL")
 WORKER_SECRET = os.getenv("WORKER_SECRET")
 LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")
 
-TG_DIRECT_MB  = 100    # до этого РЕАЛЬНОГО размера шлём прямо в чат
+TG_DIRECT_MB  = 200    # до этого РЕАЛЬНОГО размера шлём прямо в чат
 APPROX_FACTOR = 0.5    # filesize_approx у YouTube завышен → корректируем (только для подписи на кнопке)
 PENDING = {}
 
