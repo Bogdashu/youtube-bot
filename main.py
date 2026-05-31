@@ -4,10 +4,10 @@ from telegram.ext import (Application, CommandHandler, MessageHandler,
                           CallbackQueryHandler, filters)
 
 TOKEN = os.getenv("BOT_TOKEN")
-RF_WORKER_URL = os.getenv("RF_WORKER_URL")        # https://ytdrf.duckdns.org:5769
+RF_WORKER_URL = os.getenv("RF_WORKER_URL")
 WORKER_SECRET = os.getenv("WORKER_SECRET")
 
-TG_DIRECT_MB = 100        # облачный Bot API на Railway тянет ~50 МБ; больше — ссылкой с РФ
+TG_DIRECT_MB = 100 
 PENDING = {}
 
 COMMON = ["--js-runtimes", "node", "--no-playlist",
