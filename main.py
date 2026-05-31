@@ -60,8 +60,8 @@ def ydlp_info(url):
     """Сначала пробуем с куки, потом без."""
     attempts = []
     if COOKIES_FILE:
-        attempts.append(COMMON)           # с куки
-    attempts.append(COMMON_NO_COOKIES)    # без куки
+        attempts.append(COMMON)
+    attempts.append(COMMON_NO_COOKIES)
     last_err = "yt-dlp failed"
     for args in attempts:
         p = subprocess.run(["yt-dlp", *args, "-J", url],
@@ -72,7 +72,7 @@ def ydlp_info(url):
     raise RuntimeError(last_err[-800:])
 
 def _sz(f, dur=0):
-    """Возвращает оценочный размер формата в байтах.
+    """Размер формата в байтах.
     Приоритет: filesize > filesize_approx > tbr*длительность.
     """
     if not f:
@@ -81,7 +81,6 @@ def _sz(f, dur=0):
         return f["filesize"]
     if f.get("filesize_approx"):
         return f["filesize_approx"]
-    # Fallback: оценка через битрейт × длительность (для YouTube DASH-потоков)
     tbr = f.get("tbr") or f.get("vbr") or 0
     if tbr and dur:
         return int(tbr * 1000 / 8 * dur)
@@ -98,10 +97,9 @@ def _best(cands):
 
 def pick_sizes(info):
     fmts = info.get("formats", [])
-    dur  = info.get("duration") or 0  # длительность в секундах
+    dur  = info.get("duration") or 0
 
-    # Все видео-только форматы (без ограничения по высоте — только для оценки размера)
-    # ВАЖНО: acodec/vcodec бывает и строка "none", и Python None — проверяем оба варианта
+    # ВАЖНО: acodec/vcodec бывает и строка "none", и Python None — проверяем оба
     vids = [f for f in fmts
             if f.get("vcodec") not in (None, "none")
             and f.get("acodec") in (None, "none")]
@@ -121,7 +119,8 @@ def pick_sizes(info):
             return _sz(best, dur) + a_size
         # комбинированные форматы (video+audio в одном)
         comb = [f for f in fmts
-                if f.get("vcodec") != "none" and f.get("acodec") != "none"
+                if f.get("vcodec") not in (None, "none")
+                and f.get("acodec") not in (None, "none")
                 and (f.get("height") or 0) <= maxh]
         cmp4 = [f for f in comb if f.get("ext") == "mp4"]
         best = _best(cmp4) or _best(comb)
@@ -129,7 +128,6 @@ def pick_sizes(info):
 
     sz_1080 = vid_total(1080)
     sz_720  = vid_total(720)
-    # Если аудио-размер неизвестен, грубая оценка ~7% от 720p-видео
     audio_est = a_size if a_size else int(sz_720 * 0.07)
     return {
         "1080": sz_1080,
@@ -143,7 +141,6 @@ def fmt_for(mode):
     if mode == "audio":
         return "bestaudio[ext=m4a]/bestaudio/best"
     h = 1080 if mode == "1080" else 720
-    # Строго: только >= 480p; без fallback на 360/240
     return (
         f"bv*[height<={h}][height>=480][ext=mp4]+ba[ext=m4a]/"
         f"bv*[height<={h}][height>=480]+ba/"
@@ -248,7 +245,6 @@ async def on_railway(q, url, mode, title):
     prefix  = "📥 Скачивание (аудио)..." if mode == "audio" else f"📥 Скачивание ({mode}p)..."
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "v.%(ext)s")
-        # Сначала пробуем с куки, потом без
         attempts = []
         if COOKIES_FILE:
             attempts.append(COMMON)
