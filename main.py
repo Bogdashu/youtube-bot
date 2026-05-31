@@ -4,10 +4,11 @@ from telegram.ext import (Application, CommandHandler, MessageHandler,
                           CallbackQueryHandler, filters)
 
 TOKEN = os.getenv("BOT_TOKEN")
-RF_WORKER_URL = os.getenv("RF_WORKER_URL")
+RF_WORKER_URL = os.getenv("RF_WORKER_URL")            # https://ytdrf.duckdns.org:5769
 WORKER_SECRET = os.getenv("WORKER_SECRET")
+LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")    # сервис telegram-bot-api на Railway
 
-TG_DIRECT_MB = 100 
+TG_DIRECT_MB = 100        # локальный TG API тянет до ~100 МБ; больше — ссылкой
 PENDING = {}
 
 COMMON = ["--js-runtimes", "node", "--no-playlist",
@@ -32,18 +33,20 @@ def pick_sizes(info):
 mb = lambda b: b / 1024 / 1024
 
 def fmt_for(mode):
-    if mode == "audio": return "bestaudio/best"
+    # жёстко требуем видео + аудио, чтобы не было «без звука»
+    if mode == "audio":
+        return "bestaudio[ext=m4a]/bestaudio/best"
     h = 1080 if mode == "1080" else 720
-    return f"(bv*[height<={h}]+ba/b)/best"
+    return (f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/"
+            f"bv*[height<={h}]+ba/"
+            f"b[height<={h}][ext=mp4]/b[height<={h}]/b")
 
 def get_real_resolution(filepath):
     try:
         cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
                "-show_entries", "stream=height", "-of", "csv=p=0", filepath]
-        result = subprocess.check_output(cmd, text=True).strip()
-        # ffprobe иногда выдаёт несколько строк — берём первую
-        result = result.splitlines()[0] if result else ""
-        return f"{result}p" if result else "unknown"
+        out = subprocess.check_output(cmd, text=True).strip().splitlines()
+        return f"{out[0]}p" if out and out[0] else "unknown"
     except Exception:
         return "unknown"
 
@@ -60,15 +63,16 @@ async def handle_message(update, context):
         s = pick_sizes(info)
     except Exception as e:
         await msg.edit_text(f"❌ Не удалось получить инфо\n{e}"); return
-    token = uuid.uuid4().hex[:12]; PENDING[token] = url
-    lbl = lambda n, x: f"{n} • {mb(x):.0f} MB" if x else f"{n} • ?"
+    title = info.get("title", "видео")
+    token = uuid.uuid4().hex[:12]
+    PENDING[token] = {"url": url, "title": title, "sizes": s}
+    lbl = lambda n, x: f"{n} • ~{mb(x):.0f} MB" if x else f"{n} • ?"
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(lbl("1080p", s["1080"]), callback_data=f"dl|{token}|1080")],
         [InlineKeyboardButton(lbl("720p",  s["720"]),  callback_data=f"dl|{token}|720")],
         [InlineKeyboardButton(lbl("🎵 Аудио", s["audio"]), callback_data=f"dl|{token}|audio")],
     ])
-    # без названия видео — не палим, что качается
-    await msg.edit_text("🎬 Выбери качество:", reply_markup=kb)
+    await msg.edit_text(f"🎬 {title}\n\nВыбери качество:", reply_markup=kb)
 
 async def run_progress(cmd, q, prefix):
     proc = await asyncio.create_subprocess_exec(
@@ -86,8 +90,8 @@ async def run_progress(cmd, q, prefix):
     await proc.wait()
     return proc.returncode, "".join(tail[-6:])
 
-async def on_railway(q, url, mode):
-    """≤100 МБ: Railway качает и заливает прямо в чат."""
+async def on_railway(q, url, mode, title):
+    """≤100 МБ: качаем и заливаем (≤49 облачный TG, 49–100 локальный TG API)."""
     chat_id = q.message.chat_id
     prefix = "📥 Скачивание (аудио)..." if mode == "audio" else f"📥 Скачивание ({mode}p)..."
     with tempfile.TemporaryDirectory() as tmp:
@@ -101,30 +105,30 @@ async def on_railway(q, url, mode):
         if not f:
             await q.edit_message_text("❌ Файл не найден"); return
         size = os.path.getsize(f) / 1024 / 1024
-        if size > TG_DIRECT_MB:
-            # оказался больше лимита Telegram — отдаём через РФ ссылкой
-            await q.edit_message_text("📥 Файл великоват, передаю на РФ-сервер...")
-            await on_worker(q, url, mode, size); return
+        if size > TG_DIRECT_MB:                      # оказался больше лимита — ссылкой
+            await q.edit_message_text("📥 Готовлю файл...")
+            await on_worker(q, url, mode, title, size); return
         if mode == "audio":
             quality = "🎵 Аудио"
         else:
             real = await asyncio.to_thread(get_real_resolution, f)
             quality = f"🎞 {real}"
-        await q.edit_message_text(f"📤 Отправка...\n{quality}\n📦 {size:.1f} MB")
-        cap = f"✅ Готово\n{quality}\n📦 {size:.1f} MB"
+        await q.edit_message_text(f"📤 Отправка...\n{quality} • 📦 {size:.1f} MB")
+        cap = f"{title}\n\n{quality} • 📦 {size:.1f} MB"
+        app = NORMAL_APP if size <= 49 or LOCAL_APP is None else LOCAL_APP
         with open(f, "rb") as fh:
             if mode == "audio":
-                await NORMAL_APP.bot.send_audio(chat_id=chat_id, audio=fh, caption=cap,
-                                                read_timeout=600, write_timeout=600)
+                await app.bot.send_audio(chat_id=chat_id, audio=fh, caption=cap,
+                                         read_timeout=1200, write_timeout=1200)
             else:
-                await NORMAL_APP.bot.send_video(chat_id=chat_id, video=fh, caption=cap,
-                                                supports_streaming=True,
-                                                read_timeout=600, write_timeout=600)
+                await app.bot.send_video(chat_id=chat_id, video=fh, caption=cap,
+                                         supports_streaming=True,
+                                         read_timeout=1200, write_timeout=1200)
         try: await q.message.delete()
         except: pass
 
-async def on_worker(q, url, mode, size_mb):
-    """>100 МБ: РФ качает, бот присылает прямую ссылку на файл."""
+async def on_worker(q, url, mode, title, size_mb):
+    """>100 МБ: качает РФ-сервер, бот присылает прямую ссылку (без упоминания, кто качает)."""
     if not RF_WORKER_URL:
         await q.edit_message_text("❌ RF_WORKER_URL не настроен"); return
     headers = {"X-Secret": WORKER_SECRET}
@@ -133,7 +137,7 @@ async def on_worker(q, url, mode, size_mb):
             r = await cl.post(f"{RF_WORKER_URL}/jobs", json={"url": url, "mode": mode}, headers=headers)
             r.raise_for_status(); job = r.json()["job_id"]
         except Exception as e:
-            await q.edit_message_text(f"❌ Не запустился РФ-воркер\n{e}"); return
+            await q.edit_message_text(f"❌ Не запустилась загрузка\n{e}"); return
         last = -5
         while True:
             await asyncio.sleep(3)
@@ -142,18 +146,18 @@ async def on_worker(q, url, mode, size_mb):
             except Exception:
                 continue
             if st["state"] == "error":
-                await q.edit_message_text(f"❌ Ошибка воркера\n{st.get('error','')[:600]}"); return
+                await q.edit_message_text(f"❌ Ошибка загрузки\n{st.get('error','')[:600]}"); return
             if st["state"] == "done": break
             p = st.get("percent", 0)
             if p - last >= 5:
                 last = p
-                pref = "📥 РФ-сервер качает (аудио)..." if mode == "audio" else f"📥 РФ-сервер качает ({mode}p)..."
+                pref = "📥 Скачивание (аудио)..." if mode == "audio" else f"📥 Скачивание ({mode}p)..."
                 try: await q.edit_message_text(f"{pref}\n⏳ {p:.0f}%")
                 except: pass
     file_url = f"{RF_WORKER_URL}/jobs/{job}/file?secret={WORKER_SECRET}"
     qlabel = "🎵 Аудио" if mode == "audio" else f"🎞 {mode}p"
     await q.edit_message_text(
-        f"✅ Готово\n{qlabel}\n📦 ~{size_mb:.0f} MB\n\n"
+        f"✅ Готово\n{title}\n{qlabel} • 📦 ~{size_mb:.0f} MB\n\n"
         f"📥 Скачать файл (нажми ссылку):\n{file_url}\n\n"
         f"⚠️ Ссылка активна ~10 минут.",
         disable_web_page_preview=True)
@@ -161,19 +165,35 @@ async def on_worker(q, url, mode, size_mb):
 async def on_choice(update, context):
     q = update.callback_query; await q.answer()
     _, token, mode = q.data.split("|")
-    url = PENDING.get(token)
-    if not url:
+    data = PENDING.get(token)
+    if not data:
         await q.edit_message_text("⌛ Ссылка устарела, пришли заново"); return
-    info = await asyncio.to_thread(ydlp_info, url)
-    s = pick_sizes(info)
+    url, title, s = data["url"], data["title"], data["sizes"]
     size_mb = mb(s[mode])
-    await q.edit_message_text(f"📥 Готовлю (~{size_mb:.0f} MB)...")
-    if mode == "audio" or size_mb <= TG_DIRECT_MB:
-        await on_railway(q, url, mode)
+    await q.edit_message_text(f"📥 Готовлю ({'аудио' if mode=='audio' else mode+'p'})...")
+    if mode != "audio" and size_mb > TG_DIRECT_MB:   # сразу на РФ, не качаем большое на Railway
+        await on_worker(q, url, mode, title, size_mb)
     else:
-        await on_worker(q, url, mode, size_mb)
+        await on_railway(q, url, mode, title)
 
-NORMAL_APP = Application.builder().token(TOKEN).build()
+# polling — на облачном API; крупные файлы шлём через локальный API
+LOCAL_APP = None
+if LOCAL_BOT_API_URL:
+    LOCAL_APP = (Application.builder().token(TOKEN)
+                 .base_url(f"{LOCAL_BOT_API_URL}/bot")
+                 .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
+                 .local_mode(True).build())
+
+async def _post_init(app):
+    if LOCAL_APP is not None:
+        await LOCAL_APP.initialize()
+
+async def _post_shutdown(app):
+    if LOCAL_APP is not None:
+        await LOCAL_APP.shutdown()
+
+NORMAL_APP = (Application.builder().token(TOKEN)
+              .post_init(_post_init).post_shutdown(_post_shutdown).build())
 
 def main():
     NORMAL_APP.add_handler(CommandHandler("start", start))
