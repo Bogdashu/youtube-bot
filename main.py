@@ -8,18 +8,22 @@ RF_WORKER_URL = os.getenv("RF_WORKER_URL")
 WORKER_SECRET = os.getenv("WORKER_SECRET")
 LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")
 
-TG_DIRECT_MB  = 100
-RAILWAY_TRY_MB = 250
-VIDEO_FACTOR  = 0.5
+TG_DIRECT_MB   = 100    # до этого РЕАЛЬНОГО размера шлём в чат
+RAILWAY_TRY_MB = 250    # если ПРОГНОЗ больше — сразу ссылкой с РФ, не качаем на Railway
+VIDEO_FACTOR   = 0.5    # YouTube завышает размер видео ~вдвое → делим прогноз пополам
 PENDING = {}
 
 COMMON = ["--js-runtimes", "node", "--no-playlist",
+          "--socket-timeout", "30", "--retries", "5",
           "--extractor-args", "youtube:player_client=android_vr,web"]
 
 def ydlp_info(url):
-    out = subprocess.check_output(["yt-dlp", *COMMON, "-J", url],
-                                  text=True, stderr=subprocess.DEVNULL)
-    return json.loads(out)
+    p = subprocess.run(["yt-dlp", *COMMON, "-J", url],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        err = (p.stderr or p.stdout or "yt-dlp failed").strip()
+        raise RuntimeError(err[-800:])   # покажем хвост реальной ошибки
+    return json.loads(p.stdout)
 
 def _sz(f):
     if not f:
