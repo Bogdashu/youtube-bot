@@ -71,11 +71,21 @@ def ydlp_info(url):
         last_err = (p.stderr or p.stdout or last_err).strip()
     raise RuntimeError(last_err[-800:])
 
-def _sz(f):
-    """Возвращает размер формата в байтах (без коэффициентов)."""
+def _sz(f, dur=0):
+    """Возвращает оценочный размер формата в байтах.
+    Приоритет: filesize > filesize_approx > tbr*длительность.
+    """
     if not f:
         return 0
-    return f.get("filesize") or f.get("filesize_approx") or 0
+    if f.get("filesize"):
+        return f["filesize"]
+    if f.get("filesize_approx"):
+        return f["filesize_approx"]
+    # Fallback: оценка через битрейт × длительность (для YouTube DASH-потоков)
+    tbr = f.get("tbr") or f.get("vbr") or 0
+    if tbr and dur:
+        return int(tbr * 1000 / 8 * dur)
+    return 0
 
 def _best(cands):
     if not cands:
@@ -88,6 +98,8 @@ def _best(cands):
 
 def pick_sizes(info):
     fmts = info.get("formats", [])
+    dur  = info.get("duration") or 0  # длительность в секундах
+
     # Все видео-только форматы (без ограничения по высоте — только для оценки размера)
     vids = [f for f in fmts
             if f.get("vcodec") != "none"
@@ -96,22 +108,22 @@ def pick_sizes(info):
             if f.get("acodec") != "none" and f.get("vcodec") == "none"]
 
     a_m4a  = [f for f in auds if f.get("ext") == "m4a"]
-    a_size = _sz(_best(a_m4a) or _best(auds))
+    best_a = _best(a_m4a) or _best(auds)
+    a_size = _sz(best_a, dur)
 
     def vid_total(maxh):
         pool = [f for f in vids if (f.get("height") or 0) <= maxh]
         if pool:
             mp4  = [f for f in pool if f.get("ext") == "mp4"]
             best = _best(mp4) or _best(pool)
-            v_sz = _sz(best)
-            return v_sz + a_size
+            return _sz(best, dur) + a_size
         # комбинированные форматы (video+audio в одном)
         comb = [f for f in fmts
                 if f.get("vcodec") != "none" and f.get("acodec") != "none"
                 and (f.get("height") or 0) <= maxh]
         cmp4 = [f for f in comb if f.get("ext") == "mp4"]
         best = _best(cmp4) or _best(comb)
-        return _sz(best)
+        return _sz(best, dur)
 
     sz_1080 = vid_total(1080)
     sz_720  = vid_total(720)
