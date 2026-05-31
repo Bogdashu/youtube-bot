@@ -4,11 +4,11 @@ from telegram.ext import (Application, CommandHandler, MessageHandler,
                           CallbackQueryHandler, filters)
 
 TOKEN = os.getenv("BOT_TOKEN")
-RF_WORKER_URL = os.getenv("RF_WORKER_URL")            # https://ytdrf.duckdns.org:5769
+RF_WORKER_URL = os.getenv("RF_WORKER_URL")
 WORKER_SECRET = os.getenv("WORKER_SECRET")
-LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")    # сервис telegram-bot-api на Railway
+LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")
 
-TG_DIRECT_MB = 100        # локальный TG API тянет до ~100 МБ; больше — ссылкой
+TG_DIRECT_MB = 100
 PENDING = {}
 
 COMMON = ["--js-runtimes", "node", "--no-playlist",
@@ -33,7 +33,6 @@ def pick_sizes(info):
 mb = lambda b: b / 1024 / 1024
 
 def fmt_for(mode):
-    # жёстко требуем видео + аудио, чтобы не было «без звука»
     if mode == "audio":
         return "bestaudio[ext=m4a]/bestaudio/best"
     h = 1080 if mode == "1080" else 720
@@ -49,6 +48,29 @@ def get_real_resolution(filepath):
         return f"{out[0]}p" if out and out[0] else "unknown"
     except Exception:
         return "unknown"
+
+# ---- локальный Bot API: ленивая, безопасная инициализация ----
+LOCAL_APP = None
+if LOCAL_BOT_API_URL:
+    LOCAL_APP = (Application.builder().token(TOKEN)
+                 .base_url(f"{LOCAL_BOT_API_URL}/bot")
+                 .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
+                 .local_mode(True).build())
+
+_local_ready = False
+async def get_local_bot():
+    """Возвращает bot локального API или None, если он недоступен."""
+    global _local_ready
+    if LOCAL_APP is None:
+        return None
+    if not _local_ready:
+        try:
+            await LOCAL_APP.initialize()
+            _local_ready = True
+        except Exception as e:
+            print(f"[local API недоступен] {e}")
+            return None
+    return LOCAL_APP.bot
 
 async def start(update, context):
     await update.message.reply_text("🎬 Отправь YouTube ссылку")
@@ -91,7 +113,7 @@ async def run_progress(cmd, q, prefix):
     return proc.returncode, "".join(tail[-6:])
 
 async def on_railway(q, url, mode, title):
-    """≤100 МБ: качаем и заливаем (≤49 облачный TG, 49–100 локальный TG API)."""
+    """≤100 МБ: качаем и заливаем (≤49 облачный, 49–100 локальный API, иначе — ссылкой)."""
     chat_id = q.message.chat_id
     prefix = "📥 Скачивание (аудио)..." if mode == "audio" else f"📥 Скачивание ({mode}p)..."
     with tempfile.TemporaryDirectory() as tmp:
@@ -105,7 +127,7 @@ async def on_railway(q, url, mode, title):
         if not f:
             await q.edit_message_text("❌ Файл не найден"); return
         size = os.path.getsize(f) / 1024 / 1024
-        if size > TG_DIRECT_MB:                      # оказался больше лимита — ссылкой
+        if size > TG_DIRECT_MB:
             await q.edit_message_text("📥 Готовлю файл...")
             await on_worker(q, url, mode, title, size); return
         if mode == "audio":
@@ -113,22 +135,36 @@ async def on_railway(q, url, mode, title):
         else:
             real = await asyncio.to_thread(get_real_resolution, f)
             quality = f"🎞 {real}"
-        await q.edit_message_text(f"📤 Отправка...\n{quality} • 📦 {size:.1f} MB")
         cap = f"{title}\n\n{quality} • 📦 {size:.1f} MB"
-        app = NORMAL_APP if size <= 49 or LOCAL_APP is None else LOCAL_APP
-        with open(f, "rb") as fh:
-            if mode == "audio":
-                await app.bot.send_audio(chat_id=chat_id, audio=fh, caption=cap,
-                                         read_timeout=1200, write_timeout=1200)
-            else:
-                await app.bot.send_video(chat_id=chat_id, video=fh, caption=cap,
-                                         supports_streaming=True,
-                                         read_timeout=1200, write_timeout=1200)
+
+        # выбираем, через что слать
+        if size <= 49:
+            app_bot = NORMAL_APP.bot
+        else:
+            app_bot = await get_local_bot()
+            if app_bot is None:                       # локальный API недоступен — ссылкой
+                await q.edit_message_text("📥 Готовлю файл...")
+                await on_worker(q, url, mode, title, size); return
+
+        await q.edit_message_text(f"📤 Отправка...\n{quality} • 📦 {size:.1f} MB")
+        try:
+            with open(f, "rb") as fh:
+                if mode == "audio":
+                    await app_bot.send_audio(chat_id=chat_id, audio=fh, caption=cap,
+                                             read_timeout=1200, write_timeout=1200)
+                else:
+                    await app_bot.send_video(chat_id=chat_id, video=fh, caption=cap,
+                                             supports_streaming=True,
+                                             read_timeout=1200, write_timeout=1200)
+        except Exception as e:                        # заливка упала — отдаём ссылкой
+            print(f"[send failed] {e}")
+            await q.edit_message_text("📥 Готовлю файл...")
+            await on_worker(q, url, mode, title, size); return
         try: await q.message.delete()
         except: pass
 
 async def on_worker(q, url, mode, title, size_mb):
-    """>100 МБ: качает РФ-сервер, бот присылает прямую ссылку (без упоминания, кто качает)."""
+    """>100 МБ или фолбэк: качает РФ-сервер, бот присылает прямую ссылку."""
     if not RF_WORKER_URL:
         await q.edit_message_text("❌ RF_WORKER_URL не настроен"); return
     headers = {"X-Secret": WORKER_SECRET}
@@ -171,29 +207,12 @@ async def on_choice(update, context):
     url, title, s = data["url"], data["title"], data["sizes"]
     size_mb = mb(s[mode])
     await q.edit_message_text(f"📥 Готовлю ({'аудио' if mode=='audio' else mode+'p'})...")
-    if mode != "audio" and size_mb > TG_DIRECT_MB:   # сразу на РФ, не качаем большое на Railway
+    if mode != "audio" and size_mb > TG_DIRECT_MB:
         await on_worker(q, url, mode, title, size_mb)
     else:
         await on_railway(q, url, mode, title)
 
-# polling — на облачном API; крупные файлы шлём через локальный API
-LOCAL_APP = None
-if LOCAL_BOT_API_URL:
-    LOCAL_APP = (Application.builder().token(TOKEN)
-                 .base_url(f"{LOCAL_BOT_API_URL}/bot")
-                 .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
-                 .local_mode(True).build())
-
-async def _post_init(app):
-    if LOCAL_APP is not None:
-        await LOCAL_APP.initialize()
-
-async def _post_shutdown(app):
-    if LOCAL_APP is not None:
-        await LOCAL_APP.shutdown()
-
-NORMAL_APP = (Application.builder().token(TOKEN)
-              .post_init(_post_init).post_shutdown(_post_shutdown).build())
+NORMAL_APP = Application.builder().token(TOKEN).build()
 
 def main():
     NORMAL_APP.add_handler(CommandHandler("start", start))
