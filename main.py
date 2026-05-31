@@ -10,6 +10,7 @@ LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")
 
 TG_DIRECT_MB = 100      # до этого РЕАЛЬНОГО размера шлём прямо в чат
 RAILWAY_TRY_MB = 250    # если ПРОГНОЗ больше — не качаем на Railway, сразу ссылкой с РФ
+APPROX_FACTOR = 0.5     # filesize_approx у YouTube завышен ~вдвое — корректируем предпросмотр
 PENDING = {}
 
 COMMON = ["--js-runtimes", "node", "--no-playlist",
@@ -23,7 +24,9 @@ def ydlp_info(url):
 def _sz(f):
     if not f:
         return 0
-    return f.get("filesize") or f.get("filesize_approx") or 0
+    if f.get("filesize"):                                       # точный размер — как есть
+        return f["filesize"]
+    return int((f.get("filesize_approx") or 0) * APPROX_FACTOR)  # приблизительный — половиним
 
 def _best(cands):
     # как сортирует yt-dlp по умолчанию: выше разрешение, потом fps, потом битрейт
