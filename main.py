@@ -19,16 +19,41 @@ def ydlp_info(url):
                                   text=True, stderr=subprocess.DEVNULL)
     return json.loads(out)
 
+def _sz(f):
+    if not f:
+        return 0
+    return f.get("filesize") or f.get("filesize_approx") or 0
+
+def _best(cands):
+    # как сортирует yt-dlp по умолчанию: выше разрешение, потом fps, потом битрейт
+    if not cands:
+        return None
+    return max(cands, key=lambda f: ((f.get("height") or 0),
+                                     (f.get("fps") or 0),
+                                     (f.get("tbr") or 0)))
+
 def pick_sizes(info):
     fmts = info.get("formats", [])
-    sz = lambda f: f.get("filesize") or f.get("filesize_approx") or 0
+    vids = [f for f in fmts if f.get("vcodec") != "none" and f.get("acodec") == "none"]
     auds = [f for f in fmts if f.get("acodec") != "none" and f.get("vcodec") == "none"]
-    a = sz(max(auds, key=sz)) if auds else 0
-    def vid(maxh):
-        v = [f for f in fmts if f.get("vcodec") != "none" and f.get("acodec") == "none"
-             and (f.get("height") or 0) <= maxh]
-        return sz(max(v, key=lambda f: ((f.get("height") or 0), sz(f)))) if v else 0
-    return {"1080": vid(1080) + a, "720": vid(720) + a, "audio": a}
+
+    # аудио: как ba[ext=m4a]/ba — сначала m4a, потом любой
+    a_m4a = [f for f in auds if f.get("ext") == "m4a"]
+    a_size = _sz(_best(a_m4a) or _best(auds))
+
+    def vid_total(maxh):
+        pool = [f for f in vids if (f.get("height") or 0) <= maxh]
+        if pool:
+            # как bv*[height<=h][ext=mp4] / bv*[height<=h] — сначала mp4, потом любой
+            mp4 = [f for f in pool if f.get("ext") == "mp4"]
+            return _sz(_best(mp4) or _best(pool)) + a_size
+        # запасной вариант: совмещённые форматы b[height<=h]
+        comb = [f for f in fmts if f.get("vcodec") != "none" and f.get("acodec") != "none"
+                and (f.get("height") or 0) <= maxh]
+        cmp4 = [f for f in comb if f.get("ext") == "mp4"]
+        return _sz(_best(cmp4) or _best(comb))
+
+    return {"1080": vid_total(1080), "720": vid_total(720), "audio": a_size}
 
 mb = lambda b: b / 1024 / 1024
 
