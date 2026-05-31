@@ -164,14 +164,17 @@ async def on_railway(q, url, mode, title):
         except: pass
 
 async def on_worker(q, url, mode, title, size_mb):
-    """>100 МБ или фолбэк: качает РФ-сервер, бот присылает прямую ссылку."""
+    """>100 МБ или фолбэк: качает РФ-сервер, бот присылает прямую ссылку (одноразовый токен)."""
     if not RF_WORKER_URL:
         await q.edit_message_text("❌ RF_WORKER_URL не настроен"); return
     headers = {"X-Secret": WORKER_SECRET}
     async with httpx.AsyncClient(timeout=60) as cl:
         try:
             r = await cl.post(f"{RF_WORKER_URL}/jobs", json={"url": url, "mode": mode}, headers=headers)
-            r.raise_for_status(); job = r.json()["job_id"]
+            r.raise_for_status()
+            resp = r.json()
+            job = resp["job_id"]
+            dl_token = resp["dl_token"]
         except Exception as e:
             await q.edit_message_text(f"❌ Не запустилась загрузка\n{e}"); return
         last = -5
@@ -190,7 +193,7 @@ async def on_worker(q, url, mode, title, size_mb):
                 pref = "📥 Скачивание (аудио)..." if mode == "audio" else f"📥 Скачивание ({mode}p)..."
                 try: await q.edit_message_text(f"{pref}\n⏳ {p:.0f}%")
                 except: pass
-    file_url = f"{RF_WORKER_URL}/jobs/{job}/file?secret={WORKER_SECRET}"
+    file_url = f"{RF_WORKER_URL}/jobs/{job}/file?t={dl_token}"
     qlabel = "🎵 Аудио" if mode == "audio" else f"🎞 {mode}p"
     await q.edit_message_text(
         f"✅ Готово\n{title}\n{qlabel} • 📦 ~{size_mb:.0f} MB\n\n"
