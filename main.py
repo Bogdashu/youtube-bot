@@ -158,7 +158,8 @@ async def upload_to_rf(q, filepath, mode, title, size, real=None):
     job = resp["job_id"]; dl_token = resp["dl_token"]
     real_mb = resp.get("size_mb") or size
     file_url = f"{RF_WORKER_URL}/jobs/{job}/file?t={dl_token}"
-    qlabel = "🎵 Аудио" if mode == "audio" else f"🎞 {real or (str(mode)+'p')}""
+    qlabel = "🎵 Аудио" if mode == "audio" else f"🎞 {real or (str(mode)+'p')}"
+
     await q.edit_message_text(
         f"✅ Готово\n{title}\n{qlabel} • 📦 {real_mb:.1f} MB\n\n"
         f"📥 Скачать файл (нажми ссылку):\n{file_url}\n\n"
