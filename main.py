@@ -9,16 +9,25 @@ WORKER_SECRET = os.getenv("WORKER_SECRET")
 LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")
 
 TG_DIRECT_MB  = 200    # до этого РЕАЛЬНОГО размера шлём прямо в чат
-APPROX_FACTOR = 0.5    # filesize_approx у YouTube завышен → корректируем (только для подписи на кнопке)
+APPROX_FACTOR = 0.5    # filesize_approx у YouTube завышен → корректируем (только для подписи)
 PENDING = {}
 
-COMMON = ["--js-runtimes", "node", "--no-playlist",
-          "--extractor-args", "youtube:player_client=android_vr,web"]
+# Перебор клиентов: если YouTube требует "не бот" на одном — пробуем следующий
+CLIENTS = ["android_vr,web", "tv", "web_safari"]
+
+def _common(client):
+    return ["--js-runtimes", "node", "--no-playlist",
+            "--extractor-args", f"youtube:player_client={client}"]
 
 def ydlp_info(url):
-    out = subprocess.check_output(["yt-dlp", *COMMON, "-J", url],
-                                  text=True, stderr=subprocess.DEVNULL)
-    return json.loads(out)
+    last = "yt-dlp failed"
+    for client in CLIENTS:
+        p = subprocess.run(["yt-dlp", *_common(client), "-J", url],
+                           capture_output=True, text=True)
+        if p.returncode == 0:
+            return json.loads(p.stdout)
+        last = (p.stderr or p.stdout or last).strip()
+    raise RuntimeError(last[-800:])
 
 def _sz(f):
     if not f:
@@ -165,11 +174,23 @@ async def on_railway(q, url, mode, title):
     prefix = "📥 Скачивание (аудио)..." if mode == "audio" else f"📥 Скачивание ({mode}p)..."
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "v.%(ext)s")
-        cmd = ["yt-dlp", *COMMON, "-N", "4", "-f", fmt_for(mode), "--newline", "-o", out, url]
-        cmd += ["-x", "--audio-format", "m4a"] if mode == "audio" else ["--merge-output-format", "mp4"]
-        rc, err = await run_progress(cmd, q, prefix)
+        extra = ["-x", "--audio-format", "m4a"] if mode == "audio" else ["--merge-output-format", "mp4"]
+
+        rc, err = -1, ""
+        for client in CLIENTS:
+            cmd = ["yt-dlp", *_common(client), "-N", "4", "-f", fmt_for(mode),
+                   "--newline", "-o", out, url] + extra
+            rc, err = await run_progress(cmd, q, prefix)
+            if rc == 0:
+                break
+            # чистим папку перед повторной попыткой с другим клиентом
+            for x in os.listdir(tmp):
+                try: os.remove(os.path.join(tmp, x))
+                except: pass
+
         if rc != 0:
             await q.edit_message_text(f"❌ Ошибка yt-dlp\n{err[:800]}"); return
+
         f = next((os.path.join(tmp, x) for x in os.listdir(tmp)), None)
         if not f:
             await q.edit_message_text("❌ Файл не найден"); return
