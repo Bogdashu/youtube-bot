@@ -60,17 +60,16 @@ async def post_init(application):
 # он возвращает только комбинированные форматы без DASH-потоков,
 # из-за чего оценка размера 1080p == 720p. Стандартный клиент
 # возвращает нормальные DASH-потоки с высотами и битрейтами.
-_INFO_BASE = ["--no-playlist", "--socket-timeout", "30"]
+_INFO_BASE = ["--no-playlist", "--socket-timeout", "30", "--js-runtimes", "node"]
 
 def ydlp_info(url):
-    """Запрашиваем список форматов стандартным клиентом (для оценки размера)."""
     attempts = []
     if COOKIES_FILE:
         attempts.append([*_INFO_BASE, "--cookies", COOKIES_FILE])
     attempts.append(list(_INFO_BASE))
     last_err = "yt-dlp failed"
     for args in attempts:
-        p = subprocess.run(["yt-dlp", *args, "-J", url],
+        p = subprocess.run(["yt-dlp", *args, "-J", url],   # ✅ распаковка *args
                            capture_output=True, text=True)
         if p.returncode == 0:
             return json.loads(p.stdout)
