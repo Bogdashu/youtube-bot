@@ -207,7 +207,8 @@ async def on_railway(q, url, mode, title):
                                              read_timeout=1200, write_timeout=1200)
         except Exception as e:
             print(f"[send failed] {e}")
-            await upload_to_rf(q, f, mode, title, size); return
+            await q.edit_message_text(f"❌ Ошибка отправки в чат:\n{type(e).__name__}: {e}")
+            return
         try: await q.message.delete()
         except: pass
 
