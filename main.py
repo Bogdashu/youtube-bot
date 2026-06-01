@@ -75,7 +75,7 @@ def get_real_resolution(filepath):
     except Exception:
         return "unknown"
 
-# ---- локальный Bot API: ленивая инициализация ----
+# ---- локальный Bot API ----
 LOCAL_APP = None
 if LOCAL_BOT_API_URL:
     LOCAL_APP = (Application.builder().token(TOKEN)
@@ -83,19 +83,14 @@ if LOCAL_BOT_API_URL:
                  .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
                  .local_mode(True).build())
 
-_local_ready = False
-async def get_local_bot():
-    global _local_ready
-    if LOCAL_APP is None:
-        return None
-    if not _local_ready:
+async def _post_init(app):
+    if LOCAL_APP is not None:
         try:
-            await LOCAL_APP.initialize()
-            _local_ready = True
+            await LOCAL_APP.bot.initialize()
+            me = await LOCAL_APP.bot.get_me()
+            print(f"LOCAL API READY: @{me.username}")
         except Exception as e:
-            print(f"[local API недоступен] {e}")
-            return None
-    return LOCAL_APP.bot
+            print(f"[local API init FAILED] {e}")
 
 async def start(update, context):
     await update.message.reply_text("🎬 Отправь YouTube ссылку")
@@ -151,15 +146,14 @@ async def upload_to_rf(q, filepath, mode, title, size, real=None):
                 data = {"title": title, "ext": ext}
                 r = await cl.post(f"{RF_WORKER_URL}/upload",
                                   files=files, data=data, headers=headers)
-            r.raise_for_status()
-            resp = r.json()
+                r.raise_for_status()
+                resp = r.json()
     except Exception as e:
         await q.edit_message_text(f"❌ Не удалось залить файл\n{e}"); return
     job = resp["job_id"]; dl_token = resp["dl_token"]
     real_mb = resp.get("size_mb") or size
     file_url = f"{RF_WORKER_URL}/jobs/{job}/file?t={dl_token}"
     qlabel = "🎵 Аудио" if mode == "audio" else f"🎞 {real or (str(mode)+'p')}"
-
     await q.edit_message_text(
         f"✅ Готово\n{title}\n{qlabel} • 📦 {real_mb:.1f} MB\n\n"
         f"📥 Скачать файл (нажми ссылку):\n{file_url}\n\n"
@@ -181,7 +175,7 @@ async def on_railway(q, url, mode, title):
             await q.edit_message_text("❌ Файл не найден"); return
         size = os.path.getsize(f) / 1024 / 1024
 
-        # больше 100 МБ — ссылкой (заливаем готовый файл на РФ, без повторного скачивания)
+        # больше 200 МБ — ссылкой (заливаем готовый файл на РФ, без повторного скачивания)
         if size > TG_DIRECT_MB:
             real = await asyncio.to_thread(get_real_resolution, f) if mode != "audio" else "audio"
             await upload_to_rf(q, f, mode, title, size, real)
@@ -196,10 +190,10 @@ async def on_railway(q, url, mode, title):
 
         if size <= 49:
             app_bot = NORMAL_APP.bot
+        elif LOCAL_APP is not None:
+            app_bot = LOCAL_APP.bot
         else:
-            app_bot = await get_local_bot()
-            if app_bot is None:
-                await upload_to_rf(q, f, mode, title, size); return
+            await upload_to_rf(q, f, mode, title, size); return
 
         await q.edit_message_text(f"📤 Отправка...\n{quality} • 📦 {size:.1f} MB")
         try:
@@ -225,9 +219,9 @@ async def on_choice(update, context):
         await q.edit_message_text("⌛ Ссылка устарела, пришли заново"); return
     url, title = data["url"], data["title"]
     await q.edit_message_text(f"📥 Готовлю ({'аудио' if mode=='audio' else mode+'p'})...")
-    await on_railway(q, url, mode, title)   # всегда качаем на Railway
+    await on_railway(q, url, mode, title)
 
-NORMAL_APP = Application.builder().token(TOKEN).build()
+NORMAL_APP = Application.builder().token(TOKEN).post_init(_post_init).build()
 
 def main():
     NORMAL_APP.add_handler(CommandHandler("start", start))
