@@ -88,9 +88,13 @@ def get_real_resolution(filepath):
 LOCAL_APP = None
 if LOCAL_BOT_API_URL:
     LOCAL_APP = (Application.builder().token(TOKEN)
-                 .base_url(f"{LOCAL_BOT_API_URL}/bot")
-                 .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
-                 .local_mode(True).build())
+             .base_url(f"{LOCAL_BOT_API_URL}/bot")
+             .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
+             .local_mode(True)
+             .connect_timeout(60).pool_timeout(60)
+             .read_timeout(1800).write_timeout(1800)
+             .media_write_timeout(1800)
+             .build())
 
 async def _post_init(app):
     if LOCAL_APP is not None:
