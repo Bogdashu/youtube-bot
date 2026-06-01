@@ -137,7 +137,7 @@ async def run_progress(cmd, q, prefix):
     await proc.wait()
     return proc.returncode, "".join(tail[-6:])
 
-async def upload_to_rf(q, filepath, mode, title, size):
+async def upload_to_rf(q, filepath, mode, title, size, real=None):
     """Заливает уже скачанный файл на РФ и отдаёт ссылку. РФ ничего не качает."""
     if not RF_WORKER_URL:
         await q.edit_message_text("❌ RF_WORKER_URL не настроен"); return
@@ -158,7 +158,7 @@ async def upload_to_rf(q, filepath, mode, title, size):
     job = resp["job_id"]; dl_token = resp["dl_token"]
     real_mb = resp.get("size_mb") or size
     file_url = f"{RF_WORKER_URL}/jobs/{job}/file?t={dl_token}"
-    qlabel = "🎵 Аудио" if mode == "audio" else f"🎞 {mode}p"
+    qlabel = "🎵 Аудио" if mode == "audio" else f"🎞 {real or (str(mode)+'p')}""
     await q.edit_message_text(
         f"✅ Готово\n{title}\n{qlabel} • 📦 {real_mb:.1f} MB\n\n"
         f"📥 Скачать файл (нажми ссылку):\n{file_url}\n\n"
@@ -182,7 +182,9 @@ async def on_railway(q, url, mode, title):
 
         # больше 100 МБ — ссылкой (заливаем готовый файл на РФ, без повторного скачивания)
         if size > TG_DIRECT_MB:
-            await upload_to_rf(q, f, mode, title, size); return
+            real = await asyncio.to_thread(get_real_resolution, f) if mode != "audio" else "audio"
+            await upload_to_rf(q, f, mode, title, size, real)
+            return
 
         if mode == "audio":
             quality = "🎵 Аудио"
