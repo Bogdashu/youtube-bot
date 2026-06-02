@@ -9,16 +9,25 @@ WORKER_SECRET = os.getenv("WORKER_SECRET")
 LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")
 
 TG_DIRECT_MB  = 200    # до этого РЕАЛЬНОГО размера шлём прямо в чат
-APPROX_FACTOR = 0.5    # filesize_approx у YouTube завышен → корректируем (только для подписи на кнопке)
+APPROX_FACTOR = 0.5    # filesize_approx у YouTube завышен → корректируем (только для подписи)
 PENDING = {}
 
-COMMON = ["--js-runtimes", "node", "--no-playlist",
-          "--extractor-args", "youtube:player_client=android_vr,web"]
+# Перебор клиентов: если YouTube требует "не бот" на одном — пробуем следующий
+CLIENTS = ["android_vr,web", "tv", "web_safari"]
+
+def _common(client):
+    return ["--js-runtimes", "node", "--no-playlist",
+            "--extractor-args", f"youtube:player_client={client}"]
 
 def ydlp_info(url):
-    out = subprocess.check_output(["yt-dlp", *COMMON, "-J", url],
-                                  text=True, stderr=subprocess.DEVNULL)
-    return json.loads(out)
+    last = "yt-dlp failed"
+    for client in CLIENTS:
+        p = subprocess.run(["yt-dlp", *_common(client), "-J", url],
+                           capture_output=True, text=True)
+        if p.returncode == 0:
+            return json.loads(p.stdout)
+        last = (p.stderr or p.stdout or last).strip()
+    raise RuntimeError(last[-800:])
 
 def _sz(f):
     if not f:
@@ -75,27 +84,29 @@ def get_real_resolution(filepath):
     except Exception:
         return "unknown"
 
-# ---- локальный Bot API: ленивая инициализация ----
+# ---- локальный Bot API (инициализируем ТОЛЬКО бота, один раз на старте) ----
 LOCAL_APP = None
+LOCAL_BOT = None
 if LOCAL_BOT_API_URL:
     LOCAL_APP = (Application.builder().token(TOKEN)
                  .base_url(f"{LOCAL_BOT_API_URL}/bot")
                  .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
-                 .local_mode(True).build())
+                 .local_mode(True)
+                 .connect_timeout(60).pool_timeout(60)
+                 .read_timeout(1800).write_timeout(1800)
+                 .media_write_timeout(1800)
+                 .build())
 
-_local_ready = False
-async def get_local_bot():
-    global _local_ready
-    if LOCAL_APP is None:
-        return None
-    if not _local_ready:
+async def _post_init(app):
+    global LOCAL_BOT
+    if LOCAL_APP is not None:
         try:
-            await LOCAL_APP.initialize()
-            _local_ready = True
+            await LOCAL_APP.bot.initialize()
+            me = await LOCAL_APP.bot.get_me()
+            LOCAL_BOT = LOCAL_APP.bot
+            print(f"LOCAL API READY: @{me.username}")
         except Exception as e:
-            print(f"[local API недоступен] {e}")
-            return None
-    return LOCAL_APP.bot
+            print(f"[local API init FAILED] {e}")
 
 async def start(update, context):
     await update.message.reply_text("🎬 Отправь YouTube ссылку")
@@ -151,15 +162,14 @@ async def upload_to_rf(q, filepath, mode, title, size, real=None):
                 data = {"title": title, "ext": ext}
                 r = await cl.post(f"{RF_WORKER_URL}/upload",
                                   files=files, data=data, headers=headers)
-            r.raise_for_status()
-            resp = r.json()
+                r.raise_for_status()
+                resp = r.json()
     except Exception as e:
         await q.edit_message_text(f"❌ Не удалось залить файл\n{e}"); return
     job = resp["job_id"]; dl_token = resp["dl_token"]
     real_mb = resp.get("size_mb") or size
     file_url = f"{RF_WORKER_URL}/jobs/{job}/file?t={dl_token}"
     qlabel = "🎵 Аудио" if mode == "audio" else f"🎞 {real or (str(mode)+'p')}"
-
     await q.edit_message_text(
         f"✅ Готово\n{title}\n{qlabel} • 📦 {real_mb:.1f} MB\n\n"
         f"📥 Скачать файл (нажми ссылку):\n{file_url}\n\n"
@@ -171,17 +181,28 @@ async def on_railway(q, url, mode, title):
     prefix = "📥 Скачивание (аудио)..." if mode == "audio" else f"📥 Скачивание ({mode}p)..."
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "v.%(ext)s")
-        cmd = ["yt-dlp", *COMMON, "-N", "4", "-f", fmt_for(mode), "--newline", "-o", out, url]
-        cmd += ["-x", "--audio-format", "m4a"] if mode == "audio" else ["--merge-output-format", "mp4"]
-        rc, err = await run_progress(cmd, q, prefix)
+        extra = ["-x", "--audio-format", "m4a"] if mode == "audio" else ["--merge-output-format", "mp4"]
+
+        rc, err = -1, ""
+        for client in CLIENTS:
+            cmd = ["yt-dlp", *_common(client), "-N", "4", "-f", fmt_for(mode),
+                   "--newline", "-o", out, url] + extra
+            rc, err = await run_progress(cmd, q, prefix)
+            if rc == 0:
+                break
+            for x in os.listdir(tmp):  # чистим перед попыткой с другим клиентом
+                try: os.remove(os.path.join(tmp, x))
+                except: pass
+
         if rc != 0:
             await q.edit_message_text(f"❌ Ошибка yt-dlp\n{err[:800]}"); return
+
         f = next((os.path.join(tmp, x) for x in os.listdir(tmp)), None)
         if not f:
             await q.edit_message_text("❌ Файл не найден"); return
         size = os.path.getsize(f) / 1024 / 1024
 
-        # больше 100 МБ — ссылкой (заливаем готовый файл на РФ, без повторного скачивания)
+        # больше 200 МБ — ссылкой (заливаем готовый файл на РФ, без повторного скачивания)
         if size > TG_DIRECT_MB:
             real = await asyncio.to_thread(get_real_resolution, f) if mode != "audio" else "audio"
             await upload_to_rf(q, f, mode, title, size, real)
@@ -196,10 +217,10 @@ async def on_railway(q, url, mode, title):
 
         if size <= 49:
             app_bot = NORMAL_APP.bot
+        elif LOCAL_BOT is not None:
+            app_bot = LOCAL_BOT
         else:
-            app_bot = await get_local_bot()
-            if app_bot is None:
-                await upload_to_rf(q, f, mode, title, size); return
+            await upload_to_rf(q, f, mode, title, size); return
 
         await q.edit_message_text(f"📤 Отправка...\n{quality} • 📦 {size:.1f} MB")
         try:
@@ -213,7 +234,7 @@ async def on_railway(q, url, mode, title):
                                              read_timeout=1200, write_timeout=1200)
         except Exception as e:
             print(f"[send failed] {e}")
-            await upload_to_rf(q, f, mode, title, size); return
+            await upload_to_rf(q, f, mode, title, size); return  # не вышло в чат → отдаём ссылкой
         try: await q.message.delete()
         except: pass
 
@@ -225,9 +246,9 @@ async def on_choice(update, context):
         await q.edit_message_text("⌛ Ссылка устарела, пришли заново"); return
     url, title = data["url"], data["title"]
     await q.edit_message_text(f"📥 Готовлю ({'аудио' if mode=='audio' else mode+'p'})...")
-    await on_railway(q, url, mode, title)   # всегда качаем на Railway
+    await on_railway(q, url, mode, title)
 
-NORMAL_APP = Application.builder().token(TOKEN).build()
+NORMAL_APP = Application.builder().token(TOKEN).post_init(_post_init).build()
 
 def main():
     NORMAL_APP.add_handler(CommandHandler("start", start))
