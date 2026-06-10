@@ -8,16 +8,26 @@ RF_WORKER_URL = os.getenv("RF_WORKER_URL")
 WORKER_SECRET = os.getenv("WORKER_SECRET")
 LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")
 
-TG_DIRECT_MB  = 200    # до этого РЕАЛЬНОГО размера шлём прямо в чат
-APPROX_FACTOR = 0.5    # filesize_approx у YouTube завышен → корректируем (только для подписи)
+# ---- cookies: ОБЯЗАТЕЛЬНО для YouTube с дата-центрового IP ----
+COOKIES = os.getenv("YT_COOKIES")
+COOKIE_FILE = "/tmp/yt-cookies.txt"
+if COOKIES:
+    with open(COOKIE_FILE, "w", encoding="utf-8") as fh:
+        fh.write(COOKIES)
+
+TG_DIRECT_MB  = 200
+APPROX_FACTOR = 0.5
 PENDING = {}
 
-# Перебор клиентов: если YouTube требует "не бот" на одном — пробуем следующий
-CLIENTS = ["android_vr,web", "tv", "web_safari"]
+# с куки клиент tv/web_safari стабильнее (web быстрее "прокручивает" сессию)
+CLIENTS = ["tv", "web_safari", "android_vr,web"]
 
 def _common(client):
-    return ["--js-runtimes", "node", "--no-playlist",
+    base = ["--js-runtimes", "node", "--no-playlist",
             "--extractor-args", f"youtube:player_client={client}"]
+    if COOKIES:
+        base += ["--cookies", COOKIE_FILE]
+    return base
 
 def ydlp_info(url):
     last = "yt-dlp failed"
@@ -162,8 +172,8 @@ async def upload_to_rf(q, filepath, mode, title, size, real=None):
                 data = {"title": title, "ext": ext}
                 r = await cl.post(f"{RF_WORKER_URL}/upload",
                                   files=files, data=data, headers=headers)
-                r.raise_for_status()
-                resp = r.json()
+        r.raise_for_status()
+        resp = r.json()
     except Exception as e:
         await q.edit_message_text(f"❌ Не удалось залить файл\n{e}"); return
     job = resp["job_id"]; dl_token = resp["dl_token"]
@@ -234,7 +244,7 @@ async def on_railway(q, url, mode, title):
                                              read_timeout=1200, write_timeout=1200)
         except Exception as e:
             print(f"[send failed] {e}")
-            await upload_to_rf(q, f, mode, title, size); return  # не вышло в чат → отдаём ссылкой
+            await upload_to_rf(q, f, mode, title, size); return  # не вышло в чат → ссылкой
         try: await q.message.delete()
         except: pass
 
@@ -259,4 +269,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-  
