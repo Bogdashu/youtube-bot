@@ -1,4 +1,4 @@
-import os, re, json, uuid, asyncio, tempfile, subprocess, httpx
+import os, re, json, uuid, asyncio, tempfile, subprocess, httpx, base64
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (Application, CommandHandler, MessageHandler,
                           CallbackQueryHandler, filters)
@@ -8,12 +8,13 @@ RF_WORKER_URL = os.getenv("RF_WORKER_URL")
 WORKER_SECRET = os.getenv("WORKER_SECRET")
 LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL")
 
-# ---- cookies: ОБЯЗАТЕЛЬНО для YouTube с дата-центрового IP ----
-COOKIES = os.getenv("YT_COOKIES")
+# ---- cookies: храним в Railway как base64, тут раскодируем ----
+COOKIES_B64 = os.getenv("YT_COOKIES")
 COOKIE_FILE = "/tmp/yt-cookies.txt"
-if COOKIES:
-    with open(COOKIE_FILE, "w", encoding="utf-8") as fh:
-        fh.write(COOKIES)
+COOKIES = bool(COOKIES_B64)
+if COOKIES_B64:
+    with open(COOKIE_FILE, "wb") as fh:
+        fh.write(base64.b64decode(COOKIES_B64))
 
 TG_DIRECT_MB  = 200
 APPROX_FACTOR = 0.5
